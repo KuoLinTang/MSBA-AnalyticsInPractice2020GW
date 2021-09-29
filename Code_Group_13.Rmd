@@ -1,0 +1,2561 @@
+---
+title: "Full Work"
+author: "BA Group 13"
+date: "2020/12/5"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Import libraries
+```{r message=FALSE, warning=FALSE}
+# install.packages("xgboost")
+# install.packages("doParallel")
+library(tidyverse)
+library(caret)
+library(StatMeasures)
+library(caTools)
+library(ROSE)
+library(FSelector)
+library(data.table)
+library(e1071)
+library(pROC)
+library(xgboost)
+library(MASS)
+library(dbplyr)
+library(randomForest)
+library(neuralnet)
+library(doParallel)
+```
+
+
+## ============================== Import dataset ===============================
+
+# Load the dataset
+```{r message=FALSE, warning=FALSE}
+full_data = read_csv("IB9BW0_GroupAssignment_datafile/datafile_full.csv")
+```
+
+
+## ============================= Data Understanding =============================
+
+# Check the structure
+```{r message=FALSE, warning=FALSE}
+# Structure of the dataset
+str(full_data)
+summary(full_data)
+
+# Check number of observation
+print(paste0("Number of observations of the dataset: ", nrow(full_data)))
+print(paste0("Number of attributes of the dataset: ", ncol(full_data)))
+```
+
+# Change the data type of target variable into factor
+```{r message=FALSE, warning=FALSE}
+full_data$target <- factor(full_data$target)
+```
+
+# Dealing with missing values in the dataset
+```{r message=FALSE, warning=FALSE}
+# Show the number of missing value
+print(paste0("Number of missing value: ", nrow(full_data) - nrow(na.omit(full_data))))
+
+# Check which row has missing value
+full_data <- full_data %>%
+  mutate(Contain_NA = !complete.cases(full_data))
+
+# Check NA frequency
+barplot(table(full_data$Contain_NA), xlab= "Missing Values", ylab="Frequency")
+prop.table(table(full_data$Contain_NA))
+```
+
+# Finding outliers
+```{r}
+# Box and whisker plot for each variable
+boxplot(full_data[3:202], plot = TRUE)$out
+
+# Get numbers of rows in a vector that contain outliers
+
+# install.packages("StatMeasures")
+outlier_rownumber <- c()
+
+for (i in 3:202){
+  outlier_rownumber <- union(outlier_rownumber, 
+                             outliers(full_data[[i]])$idxOutliers)
+}
+
+outlier_rownumber <- as.character(outlier_rownumber)
+
+# Create a new boolean metric in the full_data dataset to identify rows with outliers
+full_data <- full_data %>% 
+  mutate(Contain_Outlier = ifelse(rownames(full_data) %in% outlier_rownumber, TRUE, FALSE))
+
+# Check Outliers frequency
+barplot(table(full_data$Contain_Outlier), xlab= "Outliers", ylab="Frequency")
+prop.table(table(full_data$Contain_Outlier))
+
+rm(i)
+rm(outlier_rownumber)
+```
+
+
+## ============================= Data Preparation ==============================
+
+# Data cleaning
+```{r message=FALSE, warning=FALSE}
+# Remove rows that contain missing values
+data_no_na <- na.omit(full_data)
+
+# Remove rows that contain outliers
+data_no_na <- filter(data_no_na, Contain_Outlier == FALSE)
+data_no_na_outliers <- data_no_na
+rm(data_no_na)
+```
+
+# Remove unnecessary columns
+```{r message=FALSE, warning=FALSE}
+data_no_na_outliers$ID_code <- NULL
+data_no_na_outliers$Contain_NA <- NULL
+data_no_na_outliers$Contain_Outlier <- NULL
+```
+
+# Remove duplicate data
+```{r}
+data_no_na_outliers %>% distinct_all() -> data_no_na_outliers
+```
+
+
+## ============================= Data Partitioning =============================
+
+# Check the proportion of the target values in the dataset before partitioning
+```{r}
+# Check target class frequency
+barplot(table(full_data$target), xlab= "Target Class", ylab="Frequency")
+prop.table(table(full_data$target))
+```
+
+# Create Training and Test datasets
+```{r message=FALSE, warning=FALSE}
+## Training and testing set
+set.seed(1)
+SPLIT = sample.split(data_no_na_outliers$target, SplitRatio = 0.6)
+train = subset(data_no_na_outliers, SPLIT == TRUE)
+test = subset(data_no_na_outliers, SPLIT == FALSE)
+rm(SPLIT)
+```
+
+
+## =============================== Data Balancing ===============================
+
+# Compare the target class share in training and test sets 
+```{r message=FALSE, warning=FALSE}
+rbind(train %>% summarise(dataset = "Train", 
+                          prop_0 = paste0(round(prop.table(table(train$target))[1],4)*100, "%"), 
+                          records_0 = table(train$target)[1],
+                          prop_1 = paste0(round(prop.table(table(train$target))[2],4)*100, "%"), 
+                          records_1 = table(train$target)[2],
+                          records = nrow(train)), 
+      test %>% summarise(dataset = "Test", 
+                     prop_0 = paste0(round(prop.table(table(test$target))[1],4)*100, "%"),
+                     records_0 = table(test$target)[1],
+                     prop_1 = paste0(round(prop.table(table(test$target))[2],4)*100, "%"), 
+                     records_1 = table(test$target)[2],
+                     records = nrow(test)))
+```
+
+# Data Balancing for training set
+```{r message=FALSE, warning=FALSE}
+# Undersampling technique
+train_under <- ovun.sample(target ~ ., train, method = "under", p = 0.4, seed = 1)$data
+
+# Oversampling technique
+train_over <- ovun.sample(target ~ ., train, method = "over", p = 0.4, seed = 1)$data
+
+# Both under and over sampling technique
+train_both = ovun.sample(target ~ ., train, method = "both", p = 0.4, seed = 1)$data
+
+
+# Training sets description by sampling methods
+( rbind(train_under %>% summarise(method = "Under", 
+                                  prop_0 = paste0(round(prop.table(table(train_under$target))[1],4)*100, "%"), 
+                                  prop_1 = paste0(round(prop.table(table(train_under$target))[2],4)*100, "%"),
+                                  records = nrow(train_under)),
+      train_over %>% summarise(method = "Over", 
+                                 prop_0 = paste0(round(prop.table(table(train_over$target))[1],4)*100, "%"),
+                                 prop_1 = paste0(round(prop.table(table(train_over$target))[2],4)*100, "%"),
+                                 records = nrow(train_over)),
+      train_both %>% summarise(method = "Both", 
+                                 prop_0 = paste0(round(prop.table(table(train_both$target))[1],4)*100, "%"),
+                                 prop_1 = paste0(round(prop.table(table(train_both$target))[2],4)*100, "%"),
+                                 records = nrow(train_both)),
+      train %>% summarise(method = "No Sampling", 
+                          prop_0 = paste0(round(prop.table(table(train$target))[1],4)*100, "%"), 
+                          prop_1 = paste0(round(prop.table(table(train$target))[2],4)*100, "%"), 
+                          records = nrow(train)) 
+      ) )
+```
+
+
+## ============================= Feature Selection =============================
+
+# Calculate Information Gain for all variables
+```{r message=FALSE, warning=FALSE}
+# Calculate Information Gain for the original training set 
+IG_train_origin <- information.gain(target~., train) %>%
+  arrange(desc(attr_importance)) %>%
+  filter(attr_importance != 0)
+
+colnames(IG_train_origin) = "IG_train_origin"
+IG_train_origin$rank_origin <- c(1:nrow(IG_train_origin))
+IG_train_origin <- IG_train_origin %>% setDT(., keep.rownames = "var_names")
+
+# Calculate Information Gain for the under sampled training set 
+IG_train_under <- information.gain(target~., train_under) %>%
+  arrange(desc(attr_importance)) %>%
+  filter(attr_importance != 0)
+
+colnames(IG_train_under) = "IG_train_under"
+IG_train_under$rank_under <- c(1:nrow(IG_train_under))
+IG_train_under <- IG_train_under %>% setDT(., keep.rownames = "var_names")
+
+# Calculate Information Gain for the over sampled training set 
+IG_train_over <- information.gain(target~., train_over) %>%
+  arrange(desc(attr_importance)) %>%
+  filter(attr_importance != 0)
+
+colnames(IG_train_over) = "IG_train_over"
+IG_train_over$rank_over <- c(1:nrow(IG_train_over))
+IG_train_over <- IG_train_over %>% setDT(., keep.rownames = "var_names")
+
+# Calculate Information Gain for the both over and under sampled training set 
+IG_train_both <- information.gain(target~., train_both) %>%
+  arrange(desc(attr_importance)) %>%
+  filter(attr_importance != 0)
+
+colnames(IG_train_both) = "IG_train_both"
+IG_train_both$rank_both <- c(1:nrow(IG_train_both))
+IG_train_both <- IG_train_both %>% setDT(., keep.rownames = "var_names")
+```
+
+# Test three methods of feature selection
+```{r message=FALSE, warning=FALSE}
+## (1) Select the top 10 variables
+train_origin_top = IG_train_origin %>%
+  filter(rank_origin <= 10) %>%
+  .$var_names 
+train_under_top = IG_train_under %>%
+  filter(rank_under <= 10) %>%
+  .$var_names
+train_over_top = IG_train_over %>%
+  filter(rank_over <= 10) %>%
+  .$var_names
+train_both_top = IG_train_both %>%
+  filter(rank_both <= 10) %>%
+  .$var_names
+
+# top 10 IG variables datasets
+train_origin_top = train[,c(train_origin_top, "target")]
+train_under_top = train_under[,c(train_under_top, "target")]
+train_over_top = train_over[,c(train_over_top, "target")]
+train_both_top = train_both[,c(train_both_top, "target")]
+
+
+## (2) Select all variables with positive information gains
+IG_train_origin_all = IG_train_origin$var_names
+IG_train_under_all = IG_train_under$var_names
+IG_train_over_all = IG_train_over$var_names
+IG_train_both_all = IG_train_both$var_names
+
+# Datasets with all IG > 0 variables
+
+train_var_origin_all = train[,c(IG_train_origin_all, "target")]
+train_var_under_all = train_under[,c(IG_train_under_all, "target")]
+train_var_over_all = train_over[,c(IG_train_over_all, "target")]
+train_var_both_all = train_both[,c(IG_train_both_all, "target")]
+
+
+# (3) Select all variables
+train
+train_both
+train_over
+train_under
+```
+
+
+### ================================= Modeling =================================
+
+## ========================= 1. Naive Bayes Classifier =========================
+
+# Testing Naive Bayes Classifier model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) on top 10 variables with the highest Information Gain
+```{r}
+m.nb.top.origin = naiveBayes(target ~ ., data = train_origin_top)
+m.nb.top.over = naiveBayes(target ~ ., data = train_over_top)
+m.nb.top.both = naiveBayes(target ~ ., data = train_both_top)
+m.nb.top.under = naiveBayes(target ~ ., data = train_under_top)
+
+# Confusion Matrix
+nb.top.origin.conf = confusionMatrix(predict(m.nb.top.origin, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+nb.top.over.conf = confusionMatrix(predict(m.nb.top.over, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+nb.top.both.conf = confusionMatrix(predict(m.nb.top.both, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+nb.top.under.conf = confusionMatrix(predict(m.nb.top.under, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+
+# Probability Prediction
+nb.top.origin.p = predict(m.nb.top.origin, test, type = "raw")[,2]
+nb.top.over.p = predict(m.nb.top.over, test, type = "raw")[,2]
+nb.top.both.p = predict(m.nb.top.both, test, type = "raw")[,2]
+nb.top.under.p = predict(m.nb.top.under, test, type = "raw")[,2]
+```
+
+
+# Testing Naive Bayes Classifier model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) but this time only on variables 
+# which Information Gain > 0
+```{r}
+m.nb.all.origin = naiveBayes(target ~ ., data = train_var_origin_all)
+m.nb.all.over = naiveBayes(target ~ ., data = train_var_over_all)
+m.nb.all.both = naiveBayes(target ~ ., data = train_var_both_all)
+m.nb.all.under = naiveBayes(target ~ ., data = train_var_under_all)
+
+# Confusion Matrix
+nb.all.origin.conf = confusionMatrix(predict(m.nb.all.origin, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+nb.all.over.conf = confusionMatrix(predict(m.nb.all.over, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+nb.all.both.conf = confusionMatrix(predict(m.nb.all.both, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+nb.all.under.conf = confusionMatrix(predict(m.nb.all.under, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+
+# Probability Prediction
+nb.all.origin.p = predict(m.nb.all.origin, test, type = "raw")[,2]
+nb.all.over.p = predict(m.nb.all.over, test, type = "raw")[,2]
+nb.all.both.p = predict(m.nb.all.both, test, type = "raw")[,2]
+nb.all.under.p = predict(m.nb.all.under, test, type = "raw")[,2]
+```
+
+
+# Testing Naive Bayes Classifier model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) but this time only on all 200 variables
+```{r}
+m.nb.origin = naiveBayes(target ~ ., data = train)
+m.nb.over = naiveBayes(target ~ ., data = train_over)
+m.nb.both = naiveBayes(target ~ ., data = train_both)
+m.nb.under = naiveBayes(target ~ ., data = train_under)
+
+# Confusion Matrix
+nb.origin.conf = confusionMatrix(predict(m.nb.origin, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+nb.over.conf = confusionMatrix(predict(m.nb.over, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+
+nb.both.conf = confusionMatrix(predict(m.nb.both, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+nb.under.conf = confusionMatrix(predict(m.nb.under, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+
+# Probability Prediction
+nb.origin.p = predict(m.nb.origin, test, type = "raw")[,2]
+nb.over.p = predict(m.nb.over, test, type = "raw")[,2]
+nb.both.p = predict(m.nb.both, test, type = "raw")[,2]
+nb.under.p = predict(m.nb.under, test, type = "raw")[,2]
+```
+
+
+## ===================== Naive Bayes Classifier Evaluation ======================
+
+# Get information from ConfusionMatrix
+```{r}
+##Compare Accuracy and Recall
+
+# top 10 IG variable datasets
+nb.top.origin_result = c(nb.top.origin.conf$overall["Accuracy"], nb.top.origin.conf$byClass["Recall"])
+nb.top.over_result = c(nb.top.over.conf$overall["Accuracy"], nb.top.over.conf$byClass["Recall"])
+nb.top.both_result = c(nb.top.both.conf$overall["Accuracy"], nb.top.both.conf$byClass["Recall"])
+nb.top.under_result = c(nb.top.under.conf$overall["Accuracy"], nb.top.under.conf$byClass["Recall"])
+
+# positive IG variable datasets
+nb.all.origin_result = c(nb.all.origin.conf$overall["Accuracy"], nb.all.origin.conf$byClass["Recall"])
+nb.all.over_result = c(nb.all.over.conf$overall["Accuracy"], nb.all.over.conf$byClass["Recall"])
+nb.all.both_result = c(nb.all.both.conf$overall["Accuracy"], nb.all.both.conf$byClass["Recall"])
+nb.all.under_result = c(nb.all.under.conf$overall["Accuracy"], nb.all.under.conf$byClass["Recall"])
+
+# all variable datasets
+nb.origin_result = c(nb.origin.conf$overall["Accuracy"], nb.origin.conf$byClass["Recall"])
+nb.over_result = c(nb.over.conf$overall["Accuracy"], nb.over.conf$byClass["Recall"])
+nb.both_result = c(nb.both.conf$overall["Accuracy"], nb.both.conf$byClass["Recall"])
+nb.under_result = c(nb.under.conf$overall["Accuracy"], nb.under.conf$byClass["Recall"])
+```
+
+# ROC and plot
+```{r}
+# top 10 IG variable datasets
+ROC_nb.top.origin = roc(test$target, nb.top.origin.p)
+df_nb.top.origin = data.frame(1 - ROC_nb.top.origin$specificities, ROC_nb.top.origin$sensitivities)
+ROC_nb.top.over = roc(test$target, nb.top.over.p)
+df_nb.top.over = data.frame(1 - ROC_nb.top.over$specificities, ROC_nb.top.over$sensitivities)
+ROC_nb.top.both = roc(test$target, nb.top.both.p)
+df_nb.top.both = data.frame(1 - ROC_nb.top.both$specificities, ROC_nb.top.both$sensitivities)
+ROC_nb.top.under = roc(test$target, nb.top.under.p)
+df_nb.top.under = data.frame(1 - ROC_nb.top.under$specificities, ROC_nb.top.under$sensitivities)
+
+# positive IG variable datasets
+ROC_nb.all.origin = roc(test$target, nb.all.origin.p)
+df_nb.all.origin = data.frame(1 - ROC_nb.all.origin$specificities, ROC_nb.all.origin$sensitivities)
+ROC_nb.all.over = roc(test$target, nb.all.over.p)
+df_nb.all.over = data.frame(1 - ROC_nb.all.over$specificities, ROC_nb.all.over$sensitivities)
+ROC_nb.all.both = roc(test$target, nb.all.both.p)
+df_nb.all.both = data.frame(1 - ROC_nb.all.both$specificities, ROC_nb.all.both$sensitivities)
+ROC_nb.all.under = roc(test$target, nb.all.under.p)
+df_nb.all.under = data.frame(1 - ROC_nb.all.under$specificities, ROC_nb.all.under$sensitivities)
+
+# all variable datasets
+ROC_nb.origin = roc(test$target, nb.origin.p)
+df_nb.origin = data.frame(1 - ROC_nb.origin$specificities, ROC_nb.origin$sensitivities)
+ROC_nb.over = roc(test$target, nb.over.p)
+df_nb.over = data.frame(1 - ROC_nb.over$specificities, ROC_nb.over$sensitivities)
+ROC_nb.both = roc(test$target, nb.both.p)
+df_nb.both = data.frame(1 - ROC_nb.both$specificities, ROC_nb.both$sensitivities)
+ROC_nb.under = roc(test$target, nb.under.p)
+df_nb.under = data.frame(1 - ROC_nb.under$specificities, ROC_nb.under$sensitivities)
+
+
+# Dataset Comparison Table
+nb.auc.compare = data.frame(Models = c("Top 10 IG original dataset","Top 10 IG oversampled dataset","Top 10 IG bothsampled dataset","Top 10 IG undersampled dataset","Positive IG original dataset","Positive IG oversampled dataset","Positive IG bothsampled dataset","Positive IG undersampled dataset","All features original dataset","All features oversampled dataset","All features bothsampled dataset","All features undersampled dataset"), AUC = c(auc(ROC_nb.top.origin),auc(ROC_nb.top.over),auc(ROC_nb.top.both),auc(ROC_nb.top.under), auc(ROC_nb.all.origin),auc(ROC_nb.all.over),auc(ROC_nb.all.both),auc(ROC_nb.all.under), auc(ROC_nb.origin),auc(ROC_nb.over),auc(ROC_nb.both),auc(ROC_nb.under)))
+
+nb.result = data.frame(t(data.frame(nb.top.origin_result, nb.top.over_result, nb.top.both_result, nb.top.under_result, nb.all.origin_result, nb.all.over_result, nb.all.both_result, nb.all.under_result, nb.origin_result, nb.over_result, nb.both_result, nb.under_result)))
+nb.compare = cbind(nb.result, nb.auc.compare)
+rownames(nb.compare) = nb.compare$Models
+nb.compare$Models = NULL
+nb.compare = nb.compare %>%
+  arrange(desc(Recall, AUC))
+view(nb.compare)
+
+
+## Plot ROC
+# top 10 IG variable datasets
+plot(df_nb.top.origin, col = "darkslategray1", type = 'l', xlab = "False Positive Rate", ylab = "True Positive Rate", main = "Naive Bayes Classifier with different features and balancing techniques")
+lines(df_nb.top.over, col = "darkslategray2")
+lines(df_nb.top.both, col = "darkslategray3")
+lines(df_nb.top.under, col = "darkslategray4")
+
+# positive IG variable datasets
+lines(df_nb.all.origin, col = "darkorchid1")
+lines(df_nb.all.over, col = "darkorchid2")
+lines(df_nb.all.both, col = "darkorchid3")
+lines(df_nb.all.under, col = "darkorchid4")
+
+# all variable datasets
+lines(df_nb.origin, col = "darkolivegreen1")
+lines(df_nb.over, col = "darkolivegreen2")
+lines(df_nb.both, col = "darkolivegreen3")
+lines(df_nb.under, col = "darkolivegreen4")
+
+abline(a = 0, b = 1)
+legend("bottomright", inset=c(0,0), c("Top 10 IG original dataset","Top 10 IG oversampled dataset","Top 10 IG botsampled dataset","Top 10 IG undersampled dataset","Positive IG original dataset","Positive IG oversampled dataset","Positive IG bothsampled dataset","Positive IG undersampled dataset","All features original dataset","All features oversampled dataset","All features bothsampled dataset","All features undersampled dataset"), fill=c("darkslategray1", "darkslategray2", "darkslategray3", "darkslategray4", "darkorchid1", "darkorchid2", "darkorchid3", "darkorchid4", "darkolivegreen1", "darkolivegreen2", "darkolivegreen3", "darkolivegreen4"), cex = 0.55)
+
+```
+
+
+## ================================= 2. XGBoost ==================================
+
+# Converting the test datasets into same format with training datasets.
+```{r}
+# Remove the target variable from the test set
+test_target <- test$target
+test_xgb <- test
+test_xgb$target <- NULL
+```
+
+```{r}
+# Select all variables with positive information gains in test data
+IG_test_origin_all = IG_train_origin$var_names
+IG_test_over_all = IG_train_over$var_names
+IG_test_under_all = IG_train_under$var_names
+IG_test_both_all = IG_train_both$var_names
+
+# Datasets with all IG > 0 variables in test data
+test_xgb5 = test_xgb[,c(IG_test_origin_all)]
+test_xgb6 = test_xgb[,c(IG_test_over_all)]
+test_xgb7 = test_xgb[,c(IG_test_under_all)]
+test_xgb8 = test_xgb[,c(IG_test_both_all)]
+
+## Select the top 10 variables in test data
+test_origin_top = IG_train_origin %>%
+  filter(rank_origin <= 10) %>%
+  .$var_names 
+test_over_top = IG_train_over %>%
+  filter(rank_over <= 10) %>%
+  .$var_names
+test_under_top = IG_train_under %>%
+  filter(rank_under <= 10) %>%
+  .$var_names
+test_both_top = IG_train_both %>%
+  filter(rank_both <= 10) %>%
+  .$var_names
+
+# top 10 IG variables datasets in test data
+test_xgb9 = test_xgb[,c(test_origin_top)]
+test_xgb10 = test_xgb[,c(test_over_top)]
+test_xgb11 = test_xgb[,c(test_under_top)]
+test_xgb12 = test_xgb[,c(test_both_top)]
+```
+
+
+# Remove the target variable from the training set
+```{r} 
+library(xgboost)
+
+# over sampling with all variables 
+train_target1 <- as.numeric(train_over$target) - 1
+train_xgb1 <- train_over
+train_xgb1$target <- NULL
+
+# under sampling with all variables
+train_target2 <- as.numeric(train_under$target) - 1
+train_xgb2 <- train_under
+train_xgb2$target <- NULL
+
+# both sampling with all variables 
+train_target3 <- as.numeric(train_both$target) - 1
+train_xgb3 <- train_both
+train_xgb3$target <- NULL
+ 
+# original dataset with all variables
+train_target4 <- as.numeric(train$target) - 1
+train_xgb4 <- train
+train_xgb4$target <- NULL
+
+# original dataset with all IG > 0 variables in test data
+train_target5 <- as.numeric(train_var_origin_all$target) - 1
+train_xgb5 <- train_var_origin_all
+train_xgb5$target <- NULL
+
+# over sampling with all IG > 0 variables in test data
+train_target6 <- as.numeric(train_var_over_all$target) - 1
+train_xgb6 <- train_var_over_all
+train_xgb6$target <- NULL
+
+# under sampling with all IG > 0 variables in test data
+train_target7 <- as.numeric(train_var_under_all$target) - 1
+train_xgb7 <- train_var_under_all
+train_xgb7$target <- NULL
+
+# both sampling with all IG > 0 variables in test data
+train_target8 <- as.numeric(train_var_both_all$target) - 1
+train_xgb8 <- train_var_both_all
+train_xgb8$target <- NULL
+ 
+# original dataset with top 10 IG variables 
+train_target9 <- as.numeric(train_origin_top$target) - 1
+train_xgb9 <- train_origin_top
+train_xgb9$target <- NULL
+
+# over sampling dataset with top 10 IG variables 
+train_target10 <- as.numeric(train_over_top$target) - 1
+train_xgb10 <- train_over_top
+train_xgb10$target <- NULL
+
+# under sampling dataset with top 10 IG variables 
+train_target11 <- as.numeric(train_under_top$target) - 1
+train_xgb11 <- train_under_top
+train_xgb11$target <- NULL
+
+# both sampling dataset with top 10 IG variables 
+train_target12 <- as.numeric(train_both_top$target) - 1
+train_xgb12 <- train_both_top
+train_xgb12$target <- NULL
+
+```
+
+
+# Convert data into Matrix for modeling
+```{r}
+
+train_xgb1 <- data.matrix(train_xgb1)
+dtrain1 <- xgb.DMatrix(train_xgb1, label = train_target1)
+
+train_xgb2 <- data.matrix(train_xgb2)
+dtrain2 <- xgb.DMatrix(train_xgb2, label = train_target2)
+
+train_xgb3 <- data.matrix(train_xgb3)
+dtrain3 <- xgb.DMatrix(train_xgb3, label = train_target3)
+
+train_xgb4 <- data.matrix(train_xgb4)
+dtrain4 <- xgb.DMatrix(train_xgb4, label = train_target4)
+
+train_xgb5 <- data.matrix(train_xgb5)
+dtrain5 <- xgb.DMatrix(train_xgb5, label = train_target5)
+
+train_xgb6 <- data.matrix(train_xgb6)
+dtrain6 <- xgb.DMatrix(train_xgb6, label = train_target6)
+
+train_xgb7 <- data.matrix(train_xgb7)
+dtrain7 <- xgb.DMatrix(train_xgb7, label = train_target7)
+
+train_xgb8 <- data.matrix(train_xgb8)
+dtrain8 <- xgb.DMatrix(train_xgb8, label = train_target8)
+
+train_xgb9 <- data.matrix(train_xgb9)
+dtrain9 <- xgb.DMatrix(train_xgb9, label = train_target9)
+
+train_xgb10 <- data.matrix(train_xgb10)
+dtrain10 <- xgb.DMatrix(train_xgb10, label = train_target10)
+
+train_xgb11 <- data.matrix(train_xgb11)
+dtrain11 <- xgb.DMatrix(train_xgb11, label = train_target11)
+
+train_xgb12 <- data.matrix(train_xgb12)
+dtrain12 <- xgb.DMatrix(train_xgb12, label = train_target12)
+
+# convert all test dataset 
+test_xgb <- data.matrix(test_xgb)
+test_xgb5 <- data.matrix(test_xgb5)
+test_xgb6 <- data.matrix(test_xgb6)
+test_xgb7 <- data.matrix(test_xgb7)
+test_xgb8 <- data.matrix(test_xgb8)
+test_xgb9 <- data.matrix(test_xgb9)
+test_xgb10 <- data.matrix(test_xgb10)
+test_xgb11 <- data.matrix(test_xgb11)
+test_xgb12 <- data.matrix(test_xgb12)
+
+dtest <- xgb.DMatrix(test_xgb, label = test_target)
+dtest5 <- xgb.DMatrix(test_xgb5, label = test_target)
+dtest6 <- xgb.DMatrix(test_xgb6, label = test_target)
+dtest7 <- xgb.DMatrix(test_xgb7, label = test_target)
+dtest8 <- xgb.DMatrix(test_xgb8, label = test_target)
+dtest9 <- xgb.DMatrix(test_xgb9, label = test_target)
+dtest10 <- xgb.DMatrix(test_xgb10, label = test_target)
+dtest11 <- xgb.DMatrix(test_xgb11, label = test_target)
+dtest12 <- xgb.DMatrix(test_xgb12, label = test_target)
+```
+
+
+# Tuning parameter "nround" using cross validation
+```{r}
+# nround for over sampling 
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb1 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain1,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb1)
+
+# nround for under sampling 
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb2 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain2,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb2)
+
+# nround for both sampling 
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb3 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain3,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb3)
+
+# nround for original dataset 
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb4 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain4,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb4)
+
+# nround for original dataset with IG > 0 
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb5 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain5,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb5)
+
+# nround for over sampling with IG > 0 
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb6 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain6,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb6)
+
+# nround for under sampling with IG > 0 
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb7 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain7,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb7)
+
+# nround for both sampling with IG > 0 
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb8 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain8,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb8)
+
+# nround for original dataset with top 10 variables
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb9 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain9,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb9)
+
+# nround for over sampling with top 10 variables
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb10 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain10,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb10)
+
+# nround for under sampling with top 10 variables
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb11 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain11,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb11)
+
+# nround for both sampling with top 10 variables
+set.seed(1000)
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+cv_xgb12 <- xgb.cv(params = params, 
+                max_depth = 3,
+                data = dtrain12,
+                nrounds = 4000,
+                nfold = 8,
+                showsd = FALSE,
+                print_every_n = 200,
+                )
+print(cv_xgb12)
+
+```
+
+
+# Store the best result according to cross validation 
+```{r}
+cv_result1 <- cv_xgb1$evaluation_log
+best_score1 <- max(cv_result1$test_auc_mean)
+cat("best_score1:", best_score1)
+best_itr1 <- which.max(cv_result1$test_auc_mean)
+
+cv_result2 <- cv_xgb2$evaluation_log
+best_score2 <- max(cv_result2$test_auc_mean)
+cat("best_score2:", best_score2)
+best_itr2 <- which.max(cv_result2$test_auc_mean)
+
+cv_result3 <- cv_xgb3$evaluation_log
+best_score3 <- max(cv_result3$test_auc_mean)
+cat("best_score3:", best_score3)
+best_itr3 <- which.max(cv_result3$test_auc_mean)
+
+cv_result4 <- cv_xgb4$evaluation_log
+best_score4 <- max(cv_result4$test_auc_mean)
+cat("best_score4:", best_score4)
+best_itr4 <- which.max(cv_result4$test_auc_mean)
+
+cv_result5 <- cv_xgb5$evaluation_log
+best_score5 <- max(cv_result5$test_auc_mean)
+cat("best_score5:", best_score5)
+best_itr5 <- which.max(cv_result5$test_auc_mean)
+
+cv_result6 <- cv_xgb6$evaluation_log
+best_score6 <- max(cv_result6$test_auc_mean)
+cat("best_score6:", best_score6)
+best_itr6 <- which.max(cv_result6$test_auc_mean)
+
+cv_result7 <- cv_xgb7$evaluation_log
+best_score7 <- max(cv_result7$test_auc_mean)
+cat("best_score7:", best_score7)
+best_itr7 <- which.max(cv_result7$test_auc_mean)
+
+cv_result8 <- cv_xgb8$evaluation_log
+best_score8 <- max(cv_result8$test_auc_mean)
+cat("best_score8:", best_score8)
+best_itr8 <- which.max(cv_result8$test_auc_mean)
+
+cv_result9 <- cv_xgb9$evaluation_log
+best_score9 <- max(cv_result9$test_auc_mean)
+cat("best_score9:", best_score9)
+best_itr9 <- which.max(cv_result9$test_auc_mean)
+
+cv_result10 <- cv_xgb10$evaluation_log
+best_score10 <- max(cv_result10$test_auc_mean)
+cat("best_score10:", best_score10)
+best_itr10 <- which.max(cv_result10$test_auc_mean)
+
+cv_result11 <- cv_xgb11$evaluation_log
+best_score11 <- max(cv_result11$test_auc_mean)
+cat("best_score11:", best_score11)
+best_itr11 <- which.max(cv_result11$test_auc_mean)
+
+cv_result12 <- cv_xgb12$evaluation_log
+best_score12 <- max(cv_result12$test_auc_mean)
+cat("best_score12:", best_score12)
+best_itr12 <- which.max(cv_result12$test_auc_mean)
+
+```
+
+
+# Modeling with 12 datasets
+```{r}
+
+#xgb = xgb.train(params = params,  max_depth = 5, data = dtrain, nrounds = 1200)
+MODEL1 = xgb.train(params = params,  max_depth = 3, data = dtrain1, nrounds = best_itr1)
+MODEL2 = xgb.train(params = params,  max_depth = 3, data = dtrain2, nrounds = best_itr2)
+MODEL3 = xgb.train(params = params,  max_depth = 3, data = dtrain3, nrounds = best_itr3)
+MODEL4 = xgb.train(params = params,  max_depth = 3, data = dtrain4, nrounds = best_itr4)
+MODEL5 = xgb.train(params = params,  max_depth = 3, data = dtrain5, nrounds = best_itr5)
+MODEL6 = xgb.train(params = params,  max_depth = 3, data = dtrain6, nrounds = best_itr6)
+MODEL7 = xgb.train(params = params,  max_depth = 3, data = dtrain7, nrounds = best_itr7)
+MODEL8 = xgb.train(params = params,  max_depth = 3, data = dtrain8, nrounds = best_itr8)
+MODEL9 = xgb.train(params = params,  max_depth = 3, data = dtrain9, nrounds = best_itr9)
+MODEL10 = xgb.train(params = params,  max_depth = 3, data = dtrain10, nrounds = best_itr10)
+MODEL11 = xgb.train(params = params,  max_depth = 3, data = dtrain11, nrounds = best_itr11)
+MODEL12 = xgb.train(params = params,  max_depth = 3, data = dtrain12, nrounds = best_itr12)
+```
+
+
+# Build confusionMatrix for all models 
+```{r}
+pre_score <- predict(MODEL1,newdata = dtest)
+train.o.conf = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.o.conf = confusionMatrix(train.o.conf, test_target, positive='1', mode = "prec_recall")
+
+pre_score <- predict(MODEL2,newdata = dtest)
+train.u.conf = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.u.conf = confusionMatrix(train.u.conf, test_target, positive='1', mode = "prec_recall")
+
+pre_score <- predict(MODEL3,newdata = dtest)
+train.b.conf = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.b.conf = confusionMatrix(train.b.conf, test_target, positive='1', mode = "prec_recall")
+
+pre_score <- predict(MODEL4,newdata = dtest)
+train.conf = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.conf = confusionMatrix(train.conf, test_target, positive='1', mode = "prec_recall")
+
+pre_score <- predict(MODEL5,newdata = dtest5)
+train.conf1 = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.conf1 = confusionMatrix(train.conf1, test_target, positive='1', mode = "prec_recall")
+
+pre_score <- predict(MODEL6,newdata = dtest6)
+train.o.conf1 = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.o.conf1 = confusionMatrix(train.o.conf1, test_target, positive='1', mode = "prec_recall")
+
+pre_score <- predict(MODEL7,newdata = dtest7)
+train.u.conf1 = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.u.conf1 = confusionMatrix(train.u.conf1, test_target, positive='1', mode = "prec_recall")
+
+pre_score <- predict(MODEL8,newdata = dtest8)
+train.b.conf1 = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.b.conf1 = confusionMatrix(train.b.conf1, test_target, positive='1', mode = "prec_recall")
+
+pre_score <- predict(MODEL9,newdata = dtest9)
+train.conf2 = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.conf2 = confusionMatrix(train.conf2, test_target, positive='1', mode = "prec_recall")
+
+pre_score <- predict(MODEL10,newdata = dtest10)
+train.o.conf2 = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.o.conf2 = confusionMatrix(train.o.conf2, test_target, positive='1', mode = "prec_recall")
+
+pre_score <- predict(MODEL11,newdata = dtest11)
+train.u.conf2 = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.u.conf2 = confusionMatrix(train.u.conf2, test_target, positive='1', mode = "prec_recall")
+
+pre_score <- predict(MODEL12,newdata = dtest12)
+train.b.conf2 = ifelse(pre_score > 0.5,"1", "0")%>%
+  as.factor()
+train.b.conf2 = confusionMatrix(train.b.conf2, test_target, positive='1', mode = "prec_recall")
+```
+
+
+## ============================ XGBoost Evaluation ==============================
+
+# Get information from ConfusionMatrix
+```{r}
+MODEL1_result = c(train.o.conf$overall["Accuracy"], train.o.conf$byClass["Recall"])
+MODEL2_result = c(train.u.conf$overall["Accuracy"], train.u.conf$byClass["Recall"])
+MODEL3_result = c(train.b.conf$overall["Accuracy"], train.b.conf$byClass["Recall"])
+MODEL4_result = c(train.conf$overall["Accuracy"], train.conf$byClass["Recall"])
+MODEL5_result = c(train.conf1$overall["Accuracy"], train.conf1$byClass["Recall"])
+MODEL6_result = c(train.o.conf1$overall["Accuracy"], train.o.conf1$byClass["Recall"])
+MODEL7_result = c(train.u.conf1$overall["Accuracy"], train.u.conf1$byClass["Recall"])
+MODEL8_result = c(train.b.conf1$overall["Accuracy"], train.b.conf1$byClass["Recall"])
+MODEL9_result = c(train.conf2$overall["Accuracy"], train.conf2$byClass["Recall"])
+MODEL10_result = c(train.o.conf2$overall["Accuracy"], train.o.conf2$byClass["Recall"])
+MODEL11_result = c(train.u.conf2$overall["Accuracy"], train.u.conf2$byClass["Recall"])
+MODEL12_result = c(train.b.conf2$overall["Accuracy"], train.b.conf2$byClass["Recall"])
+
+result = data.frame(t(data.frame(MODEL1_result, MODEL2_result, MODEL3_result, MODEL4_result,MODEL5_result, MODEL6_result, MODEL7_result, MODEL8_result,MODEL9_result, MODEL10_result, MODEL11_result, MODEL12_result)))
+view(result)
+```
+
+
+# ROC and plot
+```{r}
+# Build ROC objects
+library(pROC)
+ROC_MODEL1 = roc(test_target, predict(MODEL1, dtest))
+df_MODEL1 = data.frame(1 - ROC_MODEL1$specificities, ROC_MODEL1$sensitivities)
+ROC_MODEL2 = roc(test_target, predict(MODEL2, dtest))
+df_MODEL2 = data.frame(1 - ROC_MODEL2$specificities, ROC_MODEL2$sensitivities)
+ROC_MODEL3 = roc(test_target, predict(MODEL3, dtest))
+df_MODEL3 = data.frame(1 - ROC_MODEL3$specificities, ROC_MODEL3$sensitivities)
+ROC_MODEL4 = roc(test_target, predict(MODEL4, dtest))
+df_MODEL4 = data.frame(1 - ROC_MODEL4$specificities, ROC_MODEL4$sensitivities)
+ROC_MODEL5 = roc(test_target, predict(MODEL5, dtest5))
+df_MODEL5 = data.frame(1 - ROC_MODEL5$specificities, ROC_MODEL5$sensitivities)
+ROC_MODEL6 = roc(test_target, predict(MODEL6, dtest6))
+df_MODEL6 = data.frame(1 - ROC_MODEL6$specificities, ROC_MODEL6$sensitivities)
+ROC_MODEL7 = roc(test_target, predict(MODEL7, dtest7))
+df_MODEL7 = data.frame(1 - ROC_MODEL7$specificities, ROC_MODEL7$sensitivities)
+ROC_MODEL8 = roc(test_target, predict(MODEL8, dtest8))
+df_MODEL8 = data.frame(1 - ROC_MODEL8$specificities, ROC_MODEL8$sensitivities)
+ROC_MODEL9 = roc(test_target, predict(MODEL9, dtest9))
+df_MODEL9 = data.frame(1 - ROC_MODEL9$specificities, ROC_MODEL9$sensitivities)
+ROC_MODEL10 = roc(test_target, predict(MODEL10, dtest10))
+df_MODEL10 = data.frame(1 - ROC_MODEL10$specificities, ROC_MODEL10$sensitivities)
+ROC_MODEL11 = roc(test_target, predict(MODEL11, dtest11))
+df_MODEL11 = data.frame(1 - ROC_MODEL11$specificities, ROC_MODEL11$sensitivities)
+ROC_MODEL12 = roc(test_target, predict(MODEL12, dtest12))
+df_MODEL12 = data.frame(1 - ROC_MODEL12$specificities, ROC_MODEL12$sensitivities)
+
+
+# Dataset Comparison Table
+xgb.compare = data.frame( c("All features oversampled dataset", "All features undersampled dataset", "All features bothsampled dataset", "All features original dataset", "Positive IG original dataset", "Positive IG oversampled dataset","Positive IG undersampled dataset","Positive IG bothsampled dataset", "Top 10 IG original dataset","Top 10 IG oversampled dataset", "Top 10 IG undersampled dataset", "Top 10 IG bothsampled dataset"),
+          c(auc(ROC_MODEL1),auc(ROC_MODEL2),auc(ROC_MODEL3),auc(ROC_MODEL4),auc(ROC_MODEL5),auc(ROC_MODEL6),auc(ROC_MODEL7),auc(ROC_MODEL8),auc(ROC_MODEL9),auc(ROC_MODEL10),auc(ROC_MODEL11),auc(ROC_MODEL12)),result[,2])%>%
+  setNames(c("Models","AUC","Recall"))
+xgb.compare = cbind(result, xgb.compare[,c(1,2)])
+rownames(xgb.compare) = xgb.compare$Models
+xgb.compare$Models = NULL
+view(xgb.compare)
+
+
+# Plot ROC
+plot(df_MODEL9, col = "darkslategray1", type = 'l', xlab = "False Positive Rate", ylab = "True Positive Rate", main = "XGBoost with different features and balancing techniques")
+lines(df_MODEL10, col = "darkslategray2")
+lines(df_MODEL11, col = "darkslategray3")
+lines(df_MODEL12, col = "darkslategray4")
+
+#positive information gain
+lines(df_MODEL5, col = "darkorchid1")
+lines(df_MODEL6, col = "darkorchid2")
+lines(df_MODEL7, col = "darkorchid3")
+lines(df_MODEL8, col = "darkorchid4")
+
+#top 10
+lines(df_MODEL1, col = "darkolivegreen1")
+lines(df_MODEL2, col = "darkolivegreen2")
+lines(df_MODEL3, col = "darkolivegreen3")
+lines(df_MODEL4, col = "darkolivegreen4")
+
+abline(a = 0, b = 1)
+legend("bottomright", inset=c(0,0), c("Top 10 IG original dataset","Top 10 IG oversampled dataset", "Top 10 IG undersampled dataset", "Top 10 IG bothsampled dataset", "Positive IG original dataset", "Positive IG oversampled dataset","Positive IG undersampled dataset","Positive IG bothsampled dataset", "All features oversampled dataset", "All features undersampled dataset", "All features bothsampled dataset", "All features original dataset"), fill=c("darkslategray1", "darkslategray2", "darkslategray3", "darkslategray4", "darkorchid1", "darkorchid2", "darkorchid3", "darkorchid4", "darkolivegreen1", "darkolivegreen2", "darkolivegreen3", "darkolivegreen4"), cex = 0.55)
+```
+
+
+## ======================= 3. Linear Discriminant Analysis =======================
+
+# Testing Logistic Regression model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) on top 10 variables with the highest Information Gain
+```{r}
+m.lda.top.origin = lda(target ~ ., data = train_origin_top)
+m.lda.top.over = lda(target ~ ., data = train_over_top)
+m.lda.top.both = lda(target ~ ., data = train_both_top)
+m.lda.top.under = lda(target ~ ., data = train_under_top)
+
+# Class Prediction
+lda.predict.top.origin = predict(m.lda.top.origin, test)
+lda.predict.top.over = predict(m.lda.top.over, test)
+lda.predict.top.both = predict(m.lda.top.both, test)
+lda.predict.top.under = predict(m.lda.top.under, test)
+
+# Build Confusion Matrix
+lda.top.origin.conf = confusionMatrix(factor(lda.predict.top.origin$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+lda.top.over.conf = confusionMatrix(factor(lda.predict.top.over$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+lda.top.both.conf = confusionMatrix(factor(lda.predict.top.both$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+lda.top.under.conf = confusionMatrix(factor(lda.predict.top.under$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+
+# Probability Prediction
+lda.p.top.origin = lda.predict.top.origin$posterior
+lda.p.top.over = lda.predict.top.over$posterior
+lda.p.top.both = lda.predict.top.both$posterior
+lda.p.top.under = lda.predict.top.under$posterior
+
+```
+
+
+# Testing Logistic Regression model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) but this time only on variables 
+# which Information Gain > 0
+```{r}
+m.lda.all.origin = lda(target ~ ., data = train_var_origin_all)
+m.lda.all.over = lda(target ~ ., data = train_var_over_all)
+m.lda.all.both = lda(target ~ ., data = train_var_both_all)
+m.lda.all.under = lda(target ~ ., data = train_var_under_all)
+
+# Class Prediction
+lda.predict.all.origin = predict(m.lda.all.origin, test)
+lda.predict.all.over = predict(m.lda.all.over, test)
+lda.predict.all.both = predict(m.lda.all.both, test)
+lda.predict.all.under = predict(m.lda.all.under, test)
+
+# Build Confusion Matrix
+lda.all.origin.conf = confusionMatrix(factor(lda.predict.all.origin$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+lda.all.over.conf = confusionMatrix(factor(lda.predict.all.over$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+lda.all.both.conf = confusionMatrix(factor(lda.predict.all.both$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+lda.all.under.conf = confusionMatrix(factor(lda.predict.all.under$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+
+# Probability Prediction
+lda.p.all.origin = lda.predict.all.origin$posterior
+lda.p.all.over = lda.predict.all.over$posterior
+lda.p.all.both = lda.predict.all.both$posterior
+lda.p.all.under = lda.predict.all.under$posterior
+```
+
+
+# Testing Logistic Regression model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) but this time only on all 200 variables
+```{r}
+m.lda = lda(target ~ ., data = train)
+m.lda.over = lda(target ~ ., data = train_over)
+m.lda.both = lda(target ~ ., data = train_both)
+m.lda.under = lda(target ~ ., data = train_under)
+
+# Class Prediction
+lda.predict.origin = predict(m.lda, test)
+lda.predict.over = predict(m.lda.over, test)
+lda.predict.both = predict(m.lda.both, test)
+lda.predict.under = predict(m.lda.under, test)
+
+# Build Confusion Matrix
+lda.conf = confusionMatrix(factor(lda.predict.origin$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+lda.over.conf = confusionMatrix(factor(lda.predict.over$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+lda.both.conf = confusionMatrix(factor(lda.predict.both$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+lda.under.conf = confusionMatrix(factor(lda.predict.under$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+
+# Probability Prediction
+lda.p.origin = lda.predict.origin$posterior
+lda.p.over = lda.predict.over$posterior
+lda.p.both = lda.predict.both$posterior
+lda.p.under = lda.predict.under$posterior
+```
+
+
+## ============================== LDA Evaluation ===============================
+
+# Get information from ConfusionMatrix
+```{r}
+# top 10 IG variables datasets
+lda.top.origin_result = c(lda.top.origin.conf$overall["Accuracy"], lda.top.origin.conf$byClass["Recall"])
+lda.top.over_result = c(lda.top.over.conf$overall["Accuracy"], lda.top.over.conf$byClass["Recall"])
+lda.top.both_result = c(lda.top.both.conf$overall["Accuracy"], lda.top.both.conf$byClass["Recall"])
+lda.top.under_result = c(lda.top.under.conf$overall["Accuracy"], lda.top.under.conf$byClass["Recall"])
+
+# positive IG variable datasets
+lda.all.origin_result = c(lda.all.origin.conf$overall["Accuracy"], lda.all.origin.conf$byClass["Recall"])
+lda.all.over_result = c(lda.all.over.conf$overall["Accuracy"], lda.all.over.conf$byClass["Recall"])
+lda.all.both_result = c(lda.all.both.conf$overall["Accuracy"], lda.all.both.conf$byClass["Recall"])
+lda.all.under_result = c(lda.all.under.conf$overall["Accuracy"], lda.all.under.conf$byClass["Recall"])
+
+# all variable datasets
+lda.origin_result = c(lda.conf$overall["Accuracy"], lda.conf$byClass["Recall"])
+lda.over_result = c(lda.over.conf$overall["Accuracy"], lda.over.conf$byClass["Recall"])
+lda.both_result = c(lda.both.conf$overall["Accuracy"], lda.both.conf$byClass["Recall"])
+lda.under_result = c(lda.under.conf$overall["Accuracy"], lda.under.conf$byClass["Recall"])
+```
+
+
+# ROC and plot
+```{r}
+## Build ROC objects
+library(pROC)
+
+# top 10 IG variable datasets
+ROC_lda.top.origin = roc(test$target, lda.p.top.origin[,2])
+df_lda.top.origin = data.frame(1 - ROC_lda.top.origin$specificities, ROC_lda.top.origin$sensitivities)
+ROC_lda.top.over = roc(test$target, lda.p.top.over[,2])
+df_lda.top.over = data.frame(1 - ROC_lda.top.over$specificities, ROC_lda.top.over$sensitivities)
+ROC_lda.top.both = roc(test$target, lda.p.top.both[,2])
+df_lda.top.both = data.frame(1 - ROC_lda.top.both$specificities, ROC_lda.top.both$sensitivities)
+ROC_lda.top.under = roc(test$target, lda.p.top.under[,2])
+df_lda.top.under = data.frame(1 - ROC_lda.top.under$specificities, ROC_lda.top.under$sensitivities)
+
+# positive IG variable datasets
+ROC_lda.all.origin = roc(test$target, lda.p.all.origin[,2])
+df_lda.all.origin = data.frame(1 - ROC_lda.all.origin$specificities, ROC_lda.all.origin$sensitivities)
+ROC_lda.all.over = roc(test$target, lda.p.all.over[,2])
+df_lda.all.over = data.frame(1 - ROC_lda.all.over$specificities, ROC_lda.all.over$sensitivities)
+ROC_lda.all.both = roc(test$target, lda.p.all.both[,2])
+df_lda.all.both = data.frame(1 - ROC_lda.all.both$specificities, ROC_lda.all.both$sensitivities)
+ROC_lda.all.under = roc(test$target, lda.p.all.under[,2])
+df_lda.all.under = data.frame(1 - ROC_lda.all.under$specificities, ROC_lda.all.under$sensitivities)
+
+# all variable datasets
+ROC_lda.origin = roc(test$target, lda.p.origin[,2])
+df_lda.origin = data.frame(1 - ROC_lda.origin$specificities, ROC_lda.origin$sensitivities)
+ROC_lda.over = roc(test$target, lda.p.over[,2])
+df_lda.over = data.frame(1 - ROC_lda.over$specificities, ROC_lda.over$sensitivities)
+ROC_lda.both = roc(test$target, lda.p.both[,2])
+df_lda.both = data.frame(1 - ROC_lda.both$specificities, ROC_lda.both$sensitivities)
+ROC_lda.under = roc(test$target, lda.p.under[,2])
+df_lda.under = data.frame(1 - ROC_lda.under$specificities, ROC_lda.under$sensitivities)
+
+# Dataset Comparison Table
+lda.auc.compare = data.frame(Models = c("Top 10 IG original dataset","Top 10 IG oversampled dataset","Top 10 IG bothsampled dataset","Top 10 IG undersampled dataset","Positive IG original dataset","Positive IG oversampled dataset","Positive IG bothsampled dataset","Positive IG undersampled dataset","All features original dataset","All features oversampled dataset","All features bothsampled dataset","All features undersampled dataset"), AUC = c(auc(ROC_lda.top.origin),auc(ROC_lda.top.over),auc(ROC_lda.top.both),auc(ROC_lda.top.under), auc(ROC_lda.all.origin),auc(ROC_lda.all.over),auc(ROC_lda.all.both),auc(ROC_lda.all.under), auc(ROC_lda.origin),auc(ROC_lda.over),auc(ROC_lda.both),auc(ROC_lda.under))) 
+
+lda.result = data.frame(t(data.frame(lda.top.origin_result, lda.top.over_result, lda.top.both_result, lda.top.under_result, lda.all.origin_result, lda.all.over_result, lda.all.both_result, lda.all.under_result, lda.origin_result, lda.over_result, lda.both_result, lda.under_result)))
+lda.compare = cbind(lda.result, lda.auc.compare)
+rownames(lda.compare) = lda.compare$Models
+lda.compare$Models = NULL
+lda.compare = lda.compare %>%
+  arrange(desc(Recall, AUC))
+view(lda.compare)
+
+
+## Plot ROC
+
+# top 10 IG variable datasets
+plot(df_lda.top.origin, col = "darkslategray1", type = 'l', xlab = "False Positive Rate", ylab = "True Positive Rate", main = "Linear Discriminant Analysis with different features and balancing techniques")
+lines(df_lda.top.over, col = "darkslategray2")
+lines(df_lda.top.both, col = "darkslategray3")
+lines(df_lda.top.under, col = "darkslategray4")
+
+# positive IG variable datasets
+lines(df_lda.all.origin, col = "darkorchid1")
+lines(df_lda.all.over, col = "darkorchid2")
+lines(df_lda.all.both, col = "darkorchid3")
+lines(df_lda.all.under, col = "darkorchid4")
+
+# all variable datasets
+lines(df_lda.origin, col = "darkolivegreen1")
+lines(df_lda.over, col = "darkolivegreen2")
+lines(df_lda.both, col = "darkolivegreen3")
+lines(df_lda.under, col = "darkolivegreen4")
+
+abline(a = 0, b = 1)
+legend("bottomright", inset=c(0,0), c("Top 10 IG original dataset","Top 10 IG oversampled dataset","Top 10 IG botsampled dataset","Top 10 IG undersampled dataset","Positive IG original dataset","Positive IG oversampled dataset","Positive IG bothsampled dataset","Positive IG undersampled dataset","All features original dataset","All features oversampled dataset","All features bothsampled dataset","All features undersampled dataset"), fill=c("darkslategray1", "darkslategray2", "darkslategray3", "darkslategray4", "darkorchid1", "darkorchid2", "darkorchid3", "darkorchid4", "darkolivegreen1", "darkolivegreen2", "darkolivegreen3", "darkolivegreen4"), cex = 0.55)
+```
+
+
+## =========================== 4. Logistic Regression =============================
+
+# Testing Logistic Regression model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) on top 10 variables with the highest Information Gain
+```{r}
+m.glm.top.origin = glm(target ~ ., data = train_origin_top, family = "binomial")
+m.glm.top.over = glm(target ~ ., data = train_over_top, family = "binomial")
+m.glm.top.both = glm(target ~ ., data = train_both_top, family = "binomial")
+m.glm.top.under = glm(target ~ ., data = train_under_top, family = "binomial")
+
+# Probability Prediction
+glm.p.top.origin = predict(m.glm.top.origin, test, type = "response")
+glm.p.top.over = predict(m.glm.top.over, test, type = "response")
+glm.p.top.both = predict(m.glm.top.both, test, type = "response")
+glm.p.top.under = predict(m.glm.top.under, test, type = "response")
+
+# Build Confusion Matrix
+glm.top.origin.conf = confusionMatrix(factor(ifelse(glm.p.top.origin > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+glm.top.over.conf = confusionMatrix(factor(ifelse(glm.p.top.over > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+glm.top.both.conf = confusionMatrix(factor(ifelse(glm.p.top.both > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+glm.top.under.conf = confusionMatrix(factor(ifelse(glm.p.top.under > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+```
+
+
+# Testing Logistic Regression model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) but this time only on variables 
+# which Information Gain > 0
+```{r}
+m.glm.all.origin = glm(target ~ ., data = train_var_origin_all, family = "binomial")
+m.glm.all.over = glm(target ~ ., data = train_var_over_all, family = "binomial")
+m.glm.all.both = glm(target ~ ., data = train_var_both_all, family = "binomial")
+m.glm.all.under = glm(target ~ ., data = train_var_under_all, family = "binomial")
+
+# Probability Prediction
+glm.p.all.origin = predict(m.glm.all.origin, test, type = "response")
+glm.p.all.over = predict(m.glm.all.over, test, type = "response")
+glm.p.all.both = predict(m.glm.all.both, test, type = "response")
+glm.p.all.under = predict(m.glm.all.under, test, type = "response")
+
+# Build Confusion Matrix
+glm.all.origin.conf = confusionMatrix(factor(ifelse(glm.p.all.origin > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+glm.all.over.conf = confusionMatrix(factor(ifelse(glm.p.all.over > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+glm.all.both.conf = confusionMatrix(factor(ifelse(glm.p.all.both > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+glm.all.under.conf = confusionMatrix(factor(ifelse(glm.p.all.under > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+```
+
+
+# Testing Logistic Regression model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) but this time only on all 200 variables
+```{r}
+m.glm = glm(target ~ ., data = train, family = "binomial")
+m.glm.over = glm(target ~ ., data = train_over, family = "binomial")
+m.glm.both = glm(target ~ ., data = train_both, family = "binomial")
+m.glm.under = glm(target ~ ., data = train_under, family = "binomial")
+
+# Probability Prediction
+glm.p = predict(m.glm, test, type = "response")
+glm.p.over = predict(m.glm.over, test, type = "response")
+glm.p.both = predict(m.glm.both, test, type = "response")
+glm.p.under = predict(m.glm.under, test, type = "response")
+
+# Build Confusion Matrix
+glm.conf = confusionMatrix(factor(ifelse(glm.p > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+glm.over.conf = confusionMatrix(factor(ifelse(glm.p.over > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+glm.both.conf = confusionMatrix(factor(ifelse(glm.p.both > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+glm.under.conf = confusionMatrix(factor(ifelse(glm.p.under > 0.5, 1, 0)), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+```
+
+
+## ====================== Logistic Regressioon Evaluation ======================
+
+# Get information from ConfusionMatrix
+```{r}
+# top 10 IG variable datasets
+glm.top.origin_result = c(glm.top.origin.conf$overall["Accuracy"], glm.top.origin.conf$byClass["Recall"])
+glm.top.over_result = c(glm.top.over.conf$overall["Accuracy"], glm.top.over.conf$byClass["Recall"])
+glm.top.both_result = c(glm.top.both.conf$overall["Accuracy"], glm.top.both.conf$byClass["Recall"])
+glm.top.under_result = c(glm.top.under.conf$overall["Accuracy"], glm.top.under.conf$byClass["Recall"])
+
+# positive IG variable datasets
+glm.all.origin_result = c(glm.all.origin.conf$overall["Accuracy"], glm.all.origin.conf$byClass["Recall"])
+glm.all.over_result = c(glm.all.over.conf$overall["Accuracy"], glm.all.over.conf$byClass["Recall"])
+glm.all.both_result = c(glm.all.both.conf$overall["Accuracy"], glm.all.both.conf$byClass["Recall"])
+glm.all.under_result = c(glm.all.under.conf$overall["Accuracy"], glm.all.under.conf$byClass["Recall"])
+
+# all variable datasets
+glm.origin_result = c(glm.conf$overall["Accuracy"], glm.conf$byClass["Recall"])
+glm.over_result = c(glm.over.conf$overall["Accuracy"], glm.over.conf$byClass["Recall"])
+glm.both_result = c(glm.both.conf$overall["Accuracy"], glm.both.conf$byClass["Recall"])
+glm.under_result = c(glm.under.conf$overall["Accuracy"], glm.under.conf$byClass["Recall"])
+
+```
+
+# ROC and plot
+```{r}
+# top 10 IG variable datasets
+ROC_glm.top.origin = roc(test$target, glm.p.top.origin)
+df_glm.top.origin = data.frame(1 - ROC_glm.top.origin$specificities, ROC_glm.top.origin$sensitivities)
+ROC_glm.top.over = roc(test$target, glm.p.top.over)
+df_glm.top.over = data.frame(1 - ROC_glm.top.over$specificities, ROC_glm.top.over$sensitivities)
+ROC_glm.top.both = roc(test$target, glm.p.top.both)
+df_glm.top.both = data.frame(1 - ROC_glm.top.both$specificities, ROC_glm.top.both$sensitivities)
+ROC_glm.top.under = roc(test$target, glm.p.top.under)
+df_glm.top.under = data.frame(1 - ROC_glm.top.under$specificities, ROC_glm.top.under$sensitivities)
+
+# positive IG variable datasets
+ROC_glm.all.origin = roc(test$target, glm.p.all.origin)
+df_glm.all.origin = data.frame(1 - ROC_glm.all.origin$specificities, ROC_glm.all.origin$sensitivities)
+ROC_glm.all.over = roc(test$target, glm.p.all.over)
+df_glm.all.over = data.frame(1 - ROC_glm.all.over$specificities, ROC_glm.all.over$sensitivities)
+ROC_glm.all.both = roc(test$target, glm.p.all.both)
+df_glm.all.both = data.frame(1 - ROC_glm.all.both$specificities, ROC_glm.all.both$sensitivities)
+ROC_glm.all.under = roc(test$target, glm.p.all.under)
+df_glm.all.under = data.frame(1 - ROC_glm.all.under$specificities, ROC_glm.all.under$sensitivities)
+
+# all variable datasets
+ROC_glm.origin = roc(test$target, glm.p)
+df_glm.origin = data.frame(1 - ROC_glm.origin$specificities, ROC_glm.origin$sensitivities)
+ROC_glm.over = roc(test$target, glm.p.over)
+df_glm.over = data.frame(1 - ROC_glm.over$specificities, ROC_glm.over$sensitivities)
+ROC_glm.both = roc(test$target, glm.p.both)
+df_glm.both = data.frame(1 - ROC_glm.both$specificities, ROC_glm.both$sensitivities)
+ROC_glm.under = roc(test$target, glm.p.under)
+df_glm.under = data.frame(1 - ROC_glm.under$specificities, ROC_glm.under$sensitivities)
+
+
+# Dataset Comparison Table
+glm.auc.compare = data.frame(Models = c("Top 10 IG original dataset","Top 10 IG oversampled dataset","Top 10 IG bothsampled dataset","Top 10 IG undersampled dataset","Positive IG original dataset","Positive IG oversampled dataset","Positive IG bothsampled dataset","Positive IG undersampled dataset","All features original dataset","All features oversampled dataset","All features bothsampled dataset","All features undersampled dataset"), AUC = c(auc(ROC_glm.top.origin),auc(ROC_glm.top.over),auc(ROC_glm.top.both),auc(ROC_glm.top.under), auc(ROC_glm.all.origin),auc(ROC_glm.all.over),auc(ROC_glm.all.both),auc(ROC_glm.all.under), auc(ROC_glm.origin),auc(ROC_glm.over),auc(ROC_glm.both),auc(ROC_glm.under))) 
+
+glm.result = data.frame(t(data.frame(glm.top.origin_result, glm.top.over_result, glm.top.both_result, glm.top.under_result, glm.all.origin_result, glm.all.over_result, glm.all.both_result, glm.all.under_result, glm.origin_result, glm.over_result, glm.both_result, glm.under_result)))
+glm.compare = cbind(glm.result, glm.auc.compare)
+rownames(glm.compare) = glm.compare$Models
+glm.compare$Models = NULL
+glm.compare = glm.compare %>%
+  arrange(desc(Recall, AUC))
+view(glm.compare)
+
+
+## Plot ROC
+
+# top 10 IG variable datasets
+plot(df_glm.top.origin, col = "darkslategray1", type = 'l', xlab = "False Positive Rate", ylab = "True Positive Rate", main = "Logistic Regression with different features and balancing techniques")
+lines(df_glm.top.over, col = "darkslategray2")
+lines(df_glm.top.both, col = "darkslategray3")
+lines(df_glm.top.under, col = "darkslategray4")
+
+# positive IG variable datasets
+lines(df_glm.all.origin, col = "darkorchid1")
+lines(df_glm.all.over, col = "darkorchid2")
+lines(df_glm.all.both, col = "darkorchid3")
+lines(df_glm.all.under, col = "darkorchid4")
+
+# all variable datasets
+lines(df_glm.origin, col = "darkolivegreen1")
+lines(df_glm.over, col = "darkolivegreen2")
+lines(df_glm.both, col = "darkolivegreen3")
+lines(df_glm.under, col = "darkolivegreen4")
+
+abline(a = 0, b = 1)
+legend("bottomright", inset=c(0,0), c("Top 10 IG original dataset","Top 10 IG oversampled dataset","Top 10 IG botsampled dataset","Top 10 IG undersampled dataset","Positive IG original dataset","Positive IG oversampled dataset","Positive IG bothsampled dataset","Positive IG undersampled dataset","All features original dataset","All features oversampled dataset","All features bothsampled dataset","All features undersampled dataset"), fill=c("darkslategray1", "darkslategray2", "darkslategray3", "darkslategray4", "darkorchid1", "darkorchid2", "darkorchid3", "darkorchid4", "darkolivegreen1", "darkolivegreen2", "darkolivegreen3", "darkolivegreen4"), cex = 0.55)
+```
+
+
+## =============================== 5. Random Forest ===============================
+
+# Testing Random Forest model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) on all 200 variables
+```{r message=FALSE, warning=FALSE}
+# Build models
+RF_orig <- randomForest(target~., train)
+RF_both <- randomForest(target~., train_both)
+RF_over <- randomForest(target~., train_over)
+RF_under <- randomForest(target~., train_under)
+
+# Build Confusion matrix
+RF_orig_confm <- confusionMatrix(predict(RF_orig,test), test$target, positive = "1", mode = "prec_recall")
+RF_both_confm <- confusionMatrix(predict(RF_both,test), test$target, positive = "1", mode = "prec_recall")
+RF_over_confm <- confusionMatrix(predict(RF_over,test), test$target, positive = "1", mode = "prec_recall")
+RF_under_confm <- confusionMatrix(predict(RF_under,test), test$target, positive = "1", mode = "prec_recall")
+
+# Build ROC objects
+ROC_RF_orig = roc(test$target, predict(RF_orig,test,type="prob")[,2])
+ROC_RF_both = roc(test$target, predict(RF_both,test,type="prob")[,2])
+ROC_RF_over = roc(test$target, predict(RF_over,test,type="prob")[,2])
+ROC_RF_under = roc(test$target, predict(RF_under,test,type="prob")[,2])
+
+# Build the comparison tables across all models to compare Accurate, Recall rates and AUC
+original_data_result = c(RF_orig_confm$overall["Accuracy"], 
+                         RF_orig_confm$byClass["Recall"], 
+                         AUC = auc(ROC_RF_orig), 
+                         Accuracy_Train = length(which(predict(RF_orig,train)==train$target))/nrow(train))
+
+both_data_result = c(RF_both_confm$overall["Accuracy"], 
+                     RF_both_confm$byClass["Recall"], 
+                     AUC = auc(ROC_RF_both), 
+                     Accuracy_Train = length(which(predict(RF_both,train_both)==train_both$target))/nrow(train_both))
+
+over_data_result = c(RF_over_confm$overall["Accuracy"], 
+                     RF_over_confm$byClass["Recall"], 
+                     AUC = auc(ROC_RF_over), 
+                     Accuracy_Train = length(which(predict(RF_over,train_over)==train_over$target))/nrow(train_over))
+
+under_data_result = c(RF_under_confm$overall["Accuracy"], 
+                      RF_under_confm$byClass["Recall"], 
+                      AUC = auc(ROC_RF_under), 
+                      Accuracy_Train = length(which(predict(RF_under,train_under)==train_under$target))/nrow(train_under))
+
+view(data.frame(t(data.frame(original_data_result, both_data_result, over_data_result, under_data_result))))
+```
+
+
+# Testing Random Forest model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) but this time only on variables 
+# which Information Gain > 0
+```{r message=FALSE, warning=FALSE}
+# Build models
+RF_orig_ig <- randomForest(target~., train_var_origin_all)
+RF_both_ig <- randomForest(target~., train_var_both_all)
+RF_over_ig <- randomForest(target~., train_var_over_all)
+RF_under_ig <- randomForest(target~., train_var_under_all)
+
+# Build Confusion matrix
+RF_orig_ig_confm <- confusionMatrix(predict(RF_orig_ig,test), test$target, positive = "1", mode = "prec_recall")
+RF_both_ig_confm <- confusionMatrix(predict(RF_both_ig,test), test$target, positive = "1", mode = "prec_recall")
+RF_over_ig_confm <- confusionMatrix(predict(RF_over_ig,test), test$target, positive = "1", mode = "prec_recall")
+RF_under_ig_confm <- confusionMatrix(predict(RF_under_ig,test), test$target, positive = "1", mode = "prec_recall")
+
+# Build ROC objects
+ROC_RF_orig_ig = roc(test$target, predict(RF_orig_ig,test,type="prob")[,2])
+ROC_RF_both_ig = roc(test$target, predict(RF_both_ig,test,type="prob")[,2])
+ROC_RF_over_ig = roc(test$target, predict(RF_over_ig,test,type="prob")[,2])
+ROC_RF_under_ig = roc(test$target, predict(RF_under_ig,test,type="prob")[,2])
+
+# Build the comparison tables across all models to compare Accurate, Recall rates and AUC
+original_ig_data_result = c(RF_orig_ig_confm$overall["Accuracy"], 
+                         RF_orig_ig_confm$byClass["Recall"], 
+                         AUC = auc(ROC_RF_orig_ig),
+                         Accuracy_Train = length(which(predict(RF_orig_ig,train_var_origin_all)==train_var_origin_all$target))/nrow(train_var_origin_all))
+
+both_ig_data_result = c(RF_both_ig_confm$overall["Accuracy"], 
+                     RF_both_ig_confm$byClass["Recall"], 
+                     AUC = auc(ROC_RF_both_ig),
+                     Accuracy_Train = length(which(predict(RF_both_ig,train_var_both_all)==train_var_both_all$target))/nrow(train_var_both_all))
+
+over_ig_data_result = c(RF_over_ig_confm$overall["Accuracy"], 
+                     RF_over_ig_confm$byClass["Recall"], 
+                     AUC = auc(ROC_RF_over_ig),
+                     Accuracy_Train = length(which(predict(RF_over_ig,train_var_over_all)==train_var_over_all$target))/nrow(train_var_over_all))
+
+under_ig_data_result = c(RF_under_ig_confm$overall["Accuracy"], 
+                      RF_under_ig_confm$byClass["Recall"], 
+                      AUC = auc(ROC_RF_under_ig),
+                      Accuracy_Train = length(which(predict(RF_under_ig,train_var_under_all)==train_var_under_all$target))/nrow(train_var_under_all))
+
+view(data.frame(t(data.frame(original_ig_data_result, both_ig_data_result, over_ig_data_result, under_ig_data_result))))
+```
+
+
+# Testing Random Forest model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) but this time only on 
+# top 10 variables with the highest Information Gain
+```{r message=FALSE, warning=FALSE}
+# Build models
+RF_orig_top <- randomForest(target~., train_origin_top)
+RF_both_top <- randomForest(target~., train_both_top)
+RF_over_top <- randomForest(target~., train_over_top)
+RF_under_top <- randomForest(target~., train_under_top)
+
+# Build Confusion matrix
+RF_orig_top_confm <- confusionMatrix(predict(RF_orig_top,test), test$target, positive = "1", mode = "prec_recall")
+RF_both_top_confm <- confusionMatrix(predict(RF_both_top,test), test$target, positive = "1", mode = "prec_recall")
+RF_over_top_confm <- confusionMatrix(predict(RF_over_top,test), test$target, positive = "1", mode = "prec_recall")
+RF_under_top_confm <- confusionMatrix(predict(RF_under_top,test), test$target, positive = "1", mode = "prec_recall")
+
+# Build ROC objects
+ROC_RF_orig_top = roc(test$target, predict(RF_orig_top,test,type="prob")[,2])
+ROC_RF_both_top = roc(test$target, predict(RF_both_top,test,type="prob")[,2])
+ROC_RF_over_top = roc(test$target, predict(RF_over_top,test,type="prob")[,2])
+ROC_RF_under_top = roc(test$target, predict(RF_under_top,test,type="prob")[,2])
+
+# Build the comparison tables across all models to compare Accurate, Recall rates and AUC
+original_top_data_result = c(RF_orig_top_confm$overall["Accuracy"], 
+                         RF_orig_top_confm$byClass["Recall"], 
+                         AUC = auc(ROC_RF_orig_top),
+                         Accuracy_Train = length(which(predict(RF_orig_top,train_top)==train_top$target))/nrow(train_top))
+
+both_top_data_result = c(RF_both_top_confm$overall["Accuracy"], 
+                     RF_both_top_confm$byClass["Recall"], 
+                     AUC = auc(ROC_RF_both_top),
+                     Accuracy_Train = length(which(predict(RF_both_top,train_both_top)==train_both_top$target))/nrow(train_both_top))
+
+over_top_data_result = c(RF_over_top_confm$overall["Accuracy"], 
+                     RF_over_top_confm$byClass["Recall"], 
+                     AUC = auc(ROC_RF_over_top),
+                     Accuracy_Train = length(which(predict(RF_over_top,train_over_top)==train_over_top$target))/nrow(train_over_top))
+
+under_top_data_result = c(RF_under_top_confm$overall["Accuracy"], 
+                      RF_under_top_confm$byClass["Recall"], 
+                      AUC = auc(ROC_RF_under_top),
+                      Accuracy_Train = length(which(predict(RF_under_top,train_under_top)==train_under_top$target))/nrow(train_under_top))
+
+rf.auc.compare = data.frame(t(data.frame(original_top_data_result, 
+                             both_top_data_result, 
+                             over_top_data_result, 
+                             under_top_data_result)))
+view(rf.auc.compare)
+```
+
+
+## ========================== Random Forest Evaluation ==========================
+
+# ROC and plot
+```{r}
+rf.compare = data.frame(t(data.frame(`All features original dataset` = original_data_result, `All features bothsampled dataset` = both_data_result, `All features oversampled dataset` = over_data_result, `All features undersampled dataset
+` = under_data_result, `Positive IG original dataset
+` = original_ig_data_result, `Positive IG bothsampled dataset` = both_ig_data_result, `Positive IG oversampled dataset` = over_ig_data_result, `Positive IG undersampled dataset` = under_ig_data_result, `Top 10 IG original dataset` = original_top_data_result, `Top 10 IG bothsampled dataset` = both_top_data_result, `Top 10 IG oversampled dataset` = over_top_data_result, `Top 10 IG undersampled dataset` = under_top_data_result)))
+rf.compare$Accuracy_Train = NULL
+rownames(rf.compare) = c("All features original dataset", "All features bothsampled dataset", "All features oversampled dataset", "All features undersampled dataset", "Positive IG original dataset", "Positive IG bothsampled dataset", "Positive IG oversampled dataset", "Positive IG undersampled dataset", "Top 10 IG original dataset", "Top 10 IG bothsampled dataset", "Top 10 IG oversampled dataset", "Top 10 IG undersampled dataset")
+rf.compare = rf.compare %>%
+  arrange(desc(Recall))
+view(rf.compare)
+
+
+## roc dataframe
+df_RF_orig_top = data.frame(1-ROC_RF_orig_top$specificities, ROC_RF_orig_top$sensitivities)
+df_RF_over_top = data.frame(1-ROC_RF_over_top$specificities, ROC_RF_over_top$sensitivities)
+df_RF_both_top = data.frame(1-ROC_RF_both_top$specificities, ROC_RF_both_top$sensitivities)
+df_RF_under_top = data.frame(1-ROC_RF_under_top$specificities, ROC_RF_under_top$sensitivities)
+df_RF_orig_ig = data.frame(1-ROC_RF_orig_ig$specificities, ROC_RF_orig_ig$sensitivities)
+df_RF_over_ig = data.frame(1-ROC_RF_over_ig$specificities, ROC_RF_over_ig$sensitivities)
+df_RF_both_ig = data.frame(1-ROC_RF_both_ig$specificities, ROC_RF_both_ig$sensitivities)
+df_RF_under_ig = data.frame(1-ROC_RF_under_ig$specificities, ROC_RF_under_ig$sensitivities)
+df_RF_orig = data.frame(1-ROC_RF_orig$specificities, ROC_RF_orig$sensitivities)
+df_RF_over = data.frame(1-ROC_RF_over$specificities, ROC_RF_over$sensitivities)
+df_RF_both = data.frame(1-ROC_RF_both$specificities, ROC_RF_both$sensitivities)
+df_RF_under = data.frame(1-ROC_RF_under$specificities, ROC_RF_under$sensitivities)
+
+## Plot ROC
+
+# top 10 IG variable datasets
+plot(df_RF_orig_top, col = "darkslategray1", type = 'l', xlab = "False Positive Rate", ylab = "True Positive Rate", main = "Random Forest with different features and balancing techniques")
+lines(df_RF_over_top, col = "darkslategray2")
+lines(df_RF_both_top, col = "darkslategray3")
+lines(df_RF_under_top, col = "darkslategray4")
+
+# positive IG variable datasets
+lines(df_RF_orig_ig, col = "darkorchid1")
+lines(df_RF_over_ig, col = "darkorchid2")
+lines(df_RF_both_ig, col = "darkorchid3")
+lines(df_RF_under_ig, col = "darkorchid4")
+
+# all variable datasets
+lines(df_RF_orig, col = "darkolivegreen1")
+lines(df_RF_over, col = "darkolivegreen2")
+lines(df_RF_both, col = "darkolivegreen3")
+lines(df_RF_under, col = "darkolivegreen4")
+
+abline(a = 0, b = 1)
+legend("bottomright", inset=c(0,0), c("Top 10 IG original dataset","Top 10 IG oversampled dataset","Top 10 IG botsampled dataset","Top 10 IG undersampled dataset","Positive IG original dataset","Positive IG oversampled dataset","Positive IG bothsampled dataset","Positive IG undersampled dataset","All features original dataset","All features oversampled dataset","All features bothsampled dataset","All features undersampled dataset"), fill=c("darkslategray1", "darkslategray2", "darkslategray3", "darkslategray4", "darkorchid1", "darkorchid2", "darkorchid3", "darkorchid4", "darkolivegreen1", "darkolivegreen2", "darkolivegreen3", "darkolivegreen4"), cex = 0.55)
+```
+
+
+## ============================== 6. Neural Network ===============================
+
+# Testing Neural Network model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) but this time only on 
+# top 10 variables with the highest Information Gain
+```{r}
+## Data sampling: reduce data size to reduce runtime
+set.seed(123)
+SPLIT = sample.split(train_origin_top$target, SplitRatio = 0.025)
+train_origin_top.small = subset(train_origin_top, SPLIT == TRUE)
+rm(SPLIT)
+SPLIT = sample.split(train_over_top$target, SplitRatio = 0.025)
+train_over_top.small = subset(train_over_top, SPLIT == TRUE)
+rm(SPLIT)
+SPLIT = sample.split(train_both_top$target, SplitRatio = 0.025)
+train_both_top.small = subset(train_both_top, SPLIT == TRUE)
+rm(SPLIT)
+SPLIT = sample.split(train_under_top$target, SplitRatio = 0.025)
+train_under_top.small = subset(train_under_top, SPLIT == TRUE)
+rm(SPLIT)
+
+## Data normalisation
+
+# Normalising training data and testing data for top 10 feature original dataset
+norm.train_origin_top = train_origin_top.small
+norm.test_origin_top = test[,c(colnames(train_origin_top.small))]
+#The preProcess option "range" scales the data to the interval between zero and one.
+norm.values.origin_top = preProcess(train_origin_top.small[, 1:10], method=c("range"))
+norm.train_origin_top[, 1:10] = predict(norm.values.origin_top, train_origin_top.small[, 1:10])
+norm.test_origin_top[, 1:10] = predict(norm.values.origin_top, test[,c(colnames(train_origin_top.small))][, 1:10])
+rm(norm.values.origin_top)
+
+# Normalising training data and testing data for top 10 feature oversampling dataset
+norm.train_over_top = train_over_top.small
+norm.test_over_top = test[,c(colnames(train_over_top.small))]
+norm.values.over_top = preProcess(train_over_top.small[, 1:10], method=c("range")) 
+norm.train_over_top[, 1:10] = predict(norm.values.over_top, train_over_top.small[, 1:10])
+norm.test_over_top[, 1:10] = predict(norm.values.over_top, test[,c(colnames(train_over_top.small))][, 1:10])
+rm(norm.values.over_top)
+
+# Normalising training data and testing data for top 10 feature bothsampling dataset
+norm.train_both_top = train_both_top.small
+norm.test_both_top = test[,c(colnames(train_both_top.small))]
+norm.values.both_top = preProcess(train_both_top.small[, 1:10], method=c("range")) 
+norm.train_both_top[, 1:10] = predict(norm.values.both_top, train_both_top.small[, 1:10])
+norm.test_both_top[, 1:10] = predict(norm.values.both_top, test[,c(colnames(train_both_top.small))][, 1:10])
+rm(norm.values.both_top)
+
+# Normalising training data and testing data for top 10 feature undersampling dataset
+norm.train_under_top = train_under_top.small
+norm.test_under_top = test[,c(colnames(train_under_top.small))]
+norm.values.under_top = preProcess(train_under_top.small[, 1:10], method=c("range")) 
+norm.train_under_top[, 1:10] = predict(norm.values.under_top, train_under_top.small[, 1:10])
+norm.test_under_top[, 1:10] = predict(norm.values.under_top, test[,c(colnames(train_under_top.small))][, 1:10])
+rm(norm.values.under_top)
+
+
+## Find the best hidden layer size
+set.seed(123)
+registerDoParallel(makeCluster(detectCores()))
+getDoParWorkers()
+
+# original
+norm.train_origin_top$Target = norm.train_origin_top$target == 1
+norm.train_origin_top$NonTarget = norm.train_origin_top$target == 0
+m.nn.origin_top.test = train(Target + NonTarget ~.-target, data = norm.train_origin_top, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:40), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.05, act.fct = "logistic", linear.output = F, stepmax = 5e5)
+
+# oversampling
+norm.train_over_top$Target = norm.train_over_top$target == 1
+norm.train_over_top$NonTarget = norm.train_over_top$target == 0
+m.nn.over_top.test = train(Target + NonTarget ~.-target, data = norm.train_over_top, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:40), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.05, act.fct = "logistic", linear.output = F, stepmax = 5e5)
+
+# bothsampling
+norm.train_both_top$Target = norm.train_both_top$target == 1
+norm.train_both_top$NonTarget = norm.train_both_top$target == 0
+m.nn.both_top.test = train(Target + NonTarget ~.-target, data = norm.train_both_top, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:40), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.05, act.fct = "logistic", linear.output = F, stepmax = 5e5)
+
+# undersampling
+norm.train_under_top$Target = norm.train_under_top$target == 1
+norm.train_under_top$NonTarget = norm.train_under_top$target == 0
+m.nn.under_top.test = train(Target + NonTarget ~.-target, data = norm.train_under_top, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:40), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.05, act.fct = "logistic", linear.output = F, stepmax = 5e5)
+stopCluster(makeCluster(detectCores()))
+registerDoSEQ()
+
+plot(m.nn.origin_top.test)
+plot(m.nn.over_top.test)
+plot(m.nn.both_top.test)
+plot(m.nn.under_top.test)
+
+
+## Training neural network models
+# original
+set.seed(123)
+m.nn.origin_top = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_origin_top, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = 26, 
+                            stepmax = 5e5,
+                            learningrate = 0.01)
+# oversampling
+m.nn.over_top = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_over_top, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = 23, 
+                            stepmax = 5e5,
+                            learningrate = 0.01)
+# bothsampling
+m.nn.both_top = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_both_top, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = 18, 
+                            stepmax = 5e5,
+                            learningrate = 0.01)
+# undersampling
+m.nn.under_top = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_under_top, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = 17, 
+                            stepmax = 5e5,
+                            learningrate = 0.01)
+
+
+## Prediction
+# original
+nn.top.origin.p = neuralnet::compute(m.nn.origin_top, norm.test_origin_top[,c(1:20)])
+nn.top.origin.p = data.frame(nn.top.origin.p$net.result)
+nn.top.origin.class = factor(ifelse(nn.top.origin.p$X1 > nn.top.origin.p$X2, 1, 0))
+
+# oversampling
+nn.top.over.p = neuralnet::compute(m.nn.over_top, norm.test_over_top[,c(1:20)])
+nn.top.over.p = data.frame(nn.top.over.p$net.result)
+nn.top.over.class = factor(ifelse(nn.top.over.p$X1 > nn.top.over.p$X2, 1, 0))
+
+# bothsampling
+nn.top.both.p = neuralnet::compute(m.nn.both_top, norm.test_both_top[,c(1:20)])
+nn.top.both.p = data.frame(nn.top.both.p$net.result)
+nn.top.both.class = factor(ifelse(nn.top.both.p$X1 > nn.top.both.p$X2, 1, 0))
+
+# undersampling
+nn.top.under.p = neuralnet::compute(m.nn.both_top, norm.test_under_top[,c(1:20)])
+nn.top.under.p = data.frame(nn.top.under.p$net.result)
+nn.top.under.class = factor(ifelse(nn.top.under.p$X1 > nn.top.under.p$X2, 1, 0))
+
+# ConfusionMatrix
+nn.top.origin.conf = confusionMatrix(nn.top.origin.class, norm.test_origin_top$target, positive = "1")
+nn.top.over.conf = confusionMatrix(nn.top.over.class, norm.test_over_top$target, positive = "1")
+nn.top.both.conf = confusionMatrix(nn.top.both.class, norm.test_both_top$target, positive = "1")
+nn.top.under.conf = confusionMatrix(nn.top.under.class, norm.test_under_top$target, positive = "1")
+```
+
+
+# Testing Neural Network model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) but this time only on variables 
+# which Information Gain > 0
+```{r}
+## Data sampling: reduce data size to reduce runtime
+set.seed(123)
+SPLIT = sample.split(train_var_origin_all$target, SplitRatio = 0.025)
+train_origin_all.small = subset(train_var_origin_all, SPLIT == TRUE)
+rm(SPLIT)
+SPLIT = sample.split(train_var_over_all$target, SplitRatio = 0.025)
+train_over_all.small = subset(train_var_over_all, SPLIT == TRUE)
+rm(SPLIT)
+SPLIT = sample.split(train_var_both_all$target, SplitRatio = 0.025)
+train_both_all.small = subset(train_var_both_all, SPLIT == TRUE)
+rm(SPLIT)
+SPLIT = sample.split(train_var_under_all$target, SplitRatio = 0.025)
+train_under_all.small = subset(train_var_under_all, SPLIT == TRUE)
+rm(SPLIT)
+
+## Data normalisation
+# Normalising training data and testing data for IG > 0 feature original dataset
+norm.train_origin_all = train_origin_all.small
+norm.test_origin_all = test[,c(colnames(train_origin_all.small))]
+
+#The preProcess option "range" scales the data to the interval between zero and one.
+norm.values.origin_all = preProcess(train_origin_all.small[, 1:124], method=c("range")) 
+norm.train_origin_all[, 1:124] = predict(norm.values.origin_all, train_origin_all.small[, 1:124])
+norm.test_origin_all[, 1:124] = predict(norm.values.origin_all, test[,c(colnames(train_origin_all.small))][, 1:124])
+rm(norm.values.origin_all)
+
+# Normalising training data and testing data for IG > 0 feature oversampling dataset
+norm.train_over_all = train_over_all.small
+norm.test_over_all = test[,c(colnames(train_over_all.small))]
+norm.values.over_all = preProcess(train_over_all.small[, 1:184], method=c("range")) 
+norm.train_over_all[, 1:184] = predict(norm.values.over_all, train_over_all.small[, 1:184])
+norm.test_over_all[, 1:184] = predict(norm.values.over_all, test[,c(colnames(train_over_all.small))][, 1:184])
+rm(norm.values.over_all)
+
+# Normalising training data and testing data for IG > 0 feature bothsampling dataset
+norm.train_both_all = train_both_all.small
+norm.test_both_all = test[,c(colnames(train_both_all.small))]
+norm.values.both_all = preProcess(train_both_all.small[, 1:171], method=c("range")) 
+norm.train_both_all[, 1:171] = predict(norm.values.both_all, train_both_all.small[, 1:171])
+norm.test_both_all[, 1:171] = predict(norm.values.both_all, test[,c(colnames(train_both_all.small))][, 1:171])
+rm(norm.values.both_all)
+
+# Normalising training data and testing data for IG > 0 feature undersampling dataset
+norm.train_under_all = train_under_all.small
+norm.test_under_all = test[,c(colnames(train_under_all.small))]
+norm.values.under_all = preProcess(train_under_all.small[, 1:117], method=c("range")) 
+norm.train_under_all[, 1:117] = predict(norm.values.under_all, train_under_all.small[, 1:117])
+norm.test_under_all[, 1:117] = predict(norm.values.under_all, test[,c(colnames(train_under_all.small))][, 1:117])
+rm(norm.values.under_all)
+
+
+## Find the best hidden layer size
+set.seed(123)
+registerDoParallel(makeCluster(detectCores()))
+getDoParWorkers()
+
+# original
+norm.train_origin_all$Target = norm.train_origin_all$target == 1
+norm.train_origin_all$NonTarget = norm.train_origin_all$target == 0
+m.nn.origin_all.test = train(Target + NonTarget ~.-target, data = norm.train_origin_all, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:124), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.1, act.fct = "logistic", linear.output = F, stepmax = 5e6)
+
+# oversampling
+norm.train_over_all$Target = norm.train_over_all$target == 1
+norm.train_over_all$NonTarget = norm.train_over_all$target == 0
+m.nn.over_all.test = train(Target + NonTarget ~.-target, data = norm.train_over_all, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:184), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.1, act.fct = "logistic", linear.output = F, stepmax = 5e6)
+
+# bothsampling
+norm.train_both_all$Target = norm.train_both_all$target == 1
+norm.train_both_all$NonTarget = norm.train_both_all$target == 0
+m.nn.both_all.test = train(Target + NonTarget ~.-target, data = norm.train_both_all, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:171), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.1, act.fct = "logistic", linear.output = F, stepmax = 5e6)
+
+# undersampling
+norm.train_under_all$Target = norm.train_under_all$target == 1
+norm.train_under_all$NonTarget = norm.train_under_all$target == 0
+m.nn.under_all.test = train(Target + NonTarget ~.-target, data = norm.train_under_all, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:117), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.1, act.fct = "logistic", linear.output = F, stepmax = 5e6)
+stopCluster(makeCluster(detectCores()))
+registerDoSEQ()
+
+plot(m.nn.origin_all.test)
+plot(m.nn.over_all.test)
+plot(m.nn.both_all.test)
+plot(m.nn.under_all.test)
+
+
+## Training neural network models
+# original
+set.seed(123)
+m.nn.origin_all = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_origin_all, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = 22, 
+                            stepmax = 5e5,
+                            learningrate = 0.01)
+# oversampling
+m.nn.over_all = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_over_all, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = 23, 
+                            stepmax = 5e5,
+                            learningrate = 0.01)
+# bothsampling
+m.nn.both_all = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_both_all, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = 21, 
+                            stepmax = 5e5,
+                            learningrate = 0.01)
+# undersampling
+m.nn.under_all = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_under_all, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = 26, 
+                            stepmax = 5e5,
+                            learningrate = 0.01)
+
+
+## Prediction
+# original
+nn.all.origin.p = neuralnet::compute(m.nn.origin_all, norm.test_origin_all[,-125])
+nn.all.origin.p = data.frame(nn.all.origin.p$net.result)
+nn.all.origin.class = factor(ifelse(nn.all.origin.p$X1 > nn.all.origin.p$X2, 1, 0))
+
+# oversampling
+nn.all.over.p = neuralnet::compute(m.nn.over_all, norm.test_over_all[,-185])
+nn.all.over.p = data.frame(nn.all.over.p$net.result)
+nn.all.over.class = factor(ifelse(nn.all.over.p$X1 > nn.all.over.p$X2, 1, 0))
+
+# bothsampling
+nn.all.both.p = neuralnet::compute(m.nn.both_all, norm.test_both_all[,-172])
+nn.all.both.p = data.frame(nn.all.both.p$net.result)
+nn.all.both.class = factor(ifelse(nn.all.both.p$X1 > nn.all.both.p$X2, 1, 0))
+
+# undersampling
+nn.all.under.p = neuralnet::compute(m.nn.under_all, norm.test_under_all[,-118])
+nn.all.under.p = data.frame(nn.all.under.p$net.result)
+nn.all.under.class = factor(ifelse(nn.all.under.p$X1 > nn.all.under.p$X2, 1, 0))
+
+# ConfusionMatrix
+nn.all.origin.conf = confusionMatrix(nn.all.origin.class, norm.test_origin_all$target, positive = "1")
+nn.all.over.conf = confusionMatrix(nn.all.over.class, norm.test_over_all$target, positive = "1")
+nn.all.both.conf = confusionMatrix(nn.all.both.class, norm.test_both_all$target, positive = "1")
+nn.all.under.conf = confusionMatrix(nn.all.under.class, norm.test_under_all$target, positive = "1")
+```
+
+
+# Testing Neural Network model with different balancing techniques (oversampling, 
+# undersampling, both sampling, and no sampling) on all 200 variables
+```{r}
+## Data sampling: reduce data size to reduce runtime
+set.seed(123)
+SPLIT = sample.split(train$target, SplitRatio = 0.025)
+train.small = subset(train, SPLIT == TRUE)
+rm(SPLIT)
+SPLIT = sample.split(train_over$target, SplitRatio = 0.025)
+train_over.small = subset(train_over, SPLIT == TRUE)
+rm(SPLIT)
+SPLIT = sample.split(train_both$target, SplitRatio = 0.025)
+train_both.small = subset(train_both, SPLIT == TRUE)
+rm(SPLIT)
+SPLIT = sample.split(train_under$target, SplitRatio = 0.025)
+train_under.small = subset(train_under, SPLIT == TRUE)
+rm(SPLIT)
+
+## Data normalisation
+# Normalising training data and testing data for original dataset
+norm.train = train.small
+norm.test = test[,c(colnames(train.small))]
+
+#The preProcess option "range" scales the data to the interval between zero and one.
+norm.values = preProcess(train.small[, 2:201], method=c("range")) 
+norm.train[, 2:201] = predict(norm.values, train.small[, 2:201])
+norm.test[, 2:201] = predict(norm.values, test[,c(colnames(train.small))][, 2:201])
+rm(norm.values)
+
+# Normalising training data and testing data for oversampling dataset
+norm.train_over = train_over.small
+norm.test_over = test[,c(colnames(train_over.small))]
+norm.values.over = preProcess(train_over.small[, 2:201], method=c("range")) 
+norm.train_over[, 2:201] = predict(norm.values.over, train_over.small[, 2:201])
+norm.test_over[, 2:201] = predict(norm.values.over, test[,c(colnames(train_over.small))][, 2:201])
+rm(norm.values.over)
+
+# Normalising training data and testing data forbothsampling dataset
+norm.train_both = train_both.small
+norm.test_both = test[,c(colnames(train_both.small))]
+norm.values.both = preProcess(train_both.small[, 2:201], method=c("range")) 
+norm.train_both[, 2:201] = predict(norm.values.both, train_both.small[, 2:201])
+norm.test_both[, 2:201] = predict(norm.values.both, test[,c(colnames(train_both.small))][, 2:201])
+rm(norm.values.both)
+
+# Normalising training data and testing data for undersampling dataset
+norm.train_under = train_under.small
+norm.test_under = test[,c(colnames(train_under.small))]
+norm.values.under = preProcess(train_under.small[, 2:201], method=c("range")) 
+norm.train_under[, 2:201] = predict(norm.values.under, train_under.small[, 2:201])
+norm.test_under[, 2:201] = predict(norm.values.under, test[,c(colnames(train_under.small))][, 2:201])
+rm(norm.values.under)
+
+
+## Find the best hidden layer size
+set.seed(123)
+registerDoParallel(makeCluster(detectCores()))
+getDoParWorkers()
+
+# original
+norm.train$Target = norm.train$target == 1
+norm.train$NonTarget = norm.train$target == 0
+m.nn.test = train(Target + NonTarget ~.-target, data = norm.train, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:200), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.1, act.fct = "logistic", linear.output = F, stepmax = 5e6)
+
+# oversampling
+norm.train_over$Target = norm.train_over$target == 1
+norm.train_over$NonTarget = norm.train_over$target == 0
+m.nn.over.test = train(Target + NonTarget ~.-target, data = norm.train_over, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:200), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.1, act.fct = "logistic", linear.output = F, stepmax = 5e6)
+
+# bothsampling
+norm.train_both$Target = norm.train_both$target == 1
+norm.train_both$NonTarget = norm.train_both$target == 0
+m.nn.both.test = train(Target + NonTarget ~.-target, data = norm.train_both, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:200), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.1, act.fct = "logistic", linear.output = F, stepmax = 5e6)
+
+# undersampling
+norm.train_under$Target = norm.train_under$target == 1
+norm.train_under$NonTarget = norm.train_under$target == 0
+m.nn.under.test = train(Target + NonTarget ~.-target, data = norm.train_under, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(2:200), .layer2 = c(0), .layer3 = c(0)), learningrate = 0.1, act.fct = "logistic", linear.output = F, stepmax = 5e6)
+
+stopCluster(makeCluster(detectCores()))
+registerDoSEQ()
+
+plot(m.nn.test)
+plot(m.nn.over.test)
+plot(m.nn.both.test)
+plot(m.nn.under.test)
+
+
+## Training neural network models
+# original
+set.seed(123)
+m.nn = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = 22, 
+                            stepmax = 5e5,
+                            learningrate = 0.01)
+# oversampling
+m.nn.over = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_over, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = 21, 
+                            stepmax = 5e5,
+                            learningrate = 0.01)
+# bothsampling
+m.nn.both = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_both, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = 24, 
+                            stepmax = 5e5,
+                            learningrate = 0.01)
+# undersampling
+m.nn.under = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_under, 
+                            linear.output = F, act.fct = 'logistic'
+                            ,hidden = c(m.nn.under.test$bestTune$layer1), 
+                            stepmax = 22,
+                            learningrate = 0.01)
+
+## Prediction
+# original
+nn.p = neuralnet::compute(m.nn, norm.test[,-1])
+nn.p = data.frame(nn.p$net.result)
+nn.class = factor(ifelse(nn.p$X1 > nn.p$X2, 1, 0))
+
+# oversampling
+nn.over.p = neuralnet::compute(m.nn.over, norm.test_over[,-1])
+nn.over.p = data.frame(nn.over.p$net.result)
+nn.over.class = factor(ifelse(nn.over.p[[1]] > 0.5, 1, 0))
+
+# bothsampling
+nn.both.p = neuralnet::compute(m.nn.both, norm.test_both[,-1])
+nn.both.p = data.frame(nn.both.p$net.result)
+nn.both.class = factor(ifelse(nn.both.p$X1 > nn.both.p$X2, 1, 0))
+
+# undersampling
+nn.under.p = neuralnet::compute(m.nn.both, norm.test_under[,-1])
+nn.under.p = data.frame(nn.under.p$net.result)
+nn.under.class = factor(ifelse(nn.under.p$X1 > nn.under.p$X2, 1, 0))
+
+# ConfusionMatrix
+nn.conf = confusionMatrix(nn.class, norm.test$target, positive = "1")
+nn.over.conf = confusionMatrix(nn.over.class, norm.test_over$target, positive = "1")
+nn.both.conf = confusionMatrix(nn.both.class, norm.test_both$target, positive = "1")
+nn.under.conf = confusionMatrix(nn.under.class, norm.test_under$target, positive = "1")
+```
+
+
+## ========================= Neural Network Evaluation =========================
+
+# Get information from ConfusionMatrix
+```{r}
+# top 10 IG variable datasets
+nn.top.origin_result = c(nn.top.origin.conf$overall["Accuracy"], nn.top.origin.conf$byClass["Recall"])
+nn.top.over_result = c(nn.top.over.conf$overall["Accuracy"], nn.top.over.conf$byClass["Recall"])
+nn.top.both_result = c(nn.top.both.conf$overall["Accuracy"], nn.top.both.conf$byClass["Recall"])
+nn.top.under_result = c(nn.top.under.conf$overall["Accuracy"], nn.top.under.conf$byClass["Recall"])
+
+# positive IG variable datasets
+nn.all.origin_result = c(nn.all.origin.conf$overall["Accuracy"], nn.all.origin.conf$byClass["Recall"])
+nn.all.over_result = c(nn.all.over.conf$overall["Accuracy"], nn.all.over.conf$byClass["Recall"])
+nn.all.both_result = c(nn.all.both.conf$overall["Accuracy"], nn.all.both.conf$byClass["Recall"])
+nn.all.under_result = c(nn.all.under.conf$overall["Accuracy"], nn.all.under.conf$byClass["Recall"])
+
+# all variable datasets
+nn_result = c(nn.conf$overall["Accuracy"], nn.conf$byClass["Recall"])
+nn.over_result = c(nn.over.conf$overall["Accuracy"], nn.over.conf$byClass["Recall"])
+nn.both_result = c(nn.both.conf$overall["Accuracy"], nn.both.conf$byClass["Recall"])
+nn.under_result = c(nn.under.conf$overall["Accuracy"], nn.under.conf$byClass["Recall"])
+```
+
+
+# ROC and plot
+```{r}
+# top 10 IG variable datasets
+ROC_nn.top.origin = roc(test$target, nn.top.origin.p[,1])
+df_nn.top.origin = data.frame(1 - ROC_nn.top.origin$specificities, ROC_nn.top.origin$sensitivities)
+ROC_nn.top.over = roc(test$target, nn.top.over.p[,1])
+df_nn.top.over = data.frame(1 - ROC_nn.top.over$specificities, ROC_nn.top.over$sensitivities)
+ROC_nn.top.both = roc(test$target, nn.top.both.p[,1])
+df_nn.top.both = data.frame(1 - ROC_nn.top.both$specificities, ROC_nn.top.both$sensitivities)
+ROC_nn.top.under = roc(test$target, nn.top.under.p[,1])
+df_nn.top.under = data.frame(1 - ROC_nn.top.under$specificities, ROC_nn.top.under$sensitivities)
+
+# positive IG variable datasets
+ROC_nn.all.origin = roc(test$target, nn.all.origin.p[,1])
+df_nn.all.origin = data.frame(1 - ROC_nn.all.origin$specificities, ROC_nn.all.origin$sensitivities)
+ROC_nn.all.over = roc(test$target, nn.all.over.p[,1])
+df_nn.all.over = data.frame(1 - ROC_nn.all.over$specificities, ROC_nn.all.over$sensitivities)
+ROC_nn.all.both = roc(test$target, nn.all.both.p[,1])
+df_nn.all.both = data.frame(1 - ROC_nn.all.both$specificities, ROC_nn.all.both$sensitivities)
+ROC_nn.all.under = roc(test$target, nn.all.under.p[,1])
+df_nn.all.under = data.frame(1 - ROC_nn.all.under$specificities, ROC_nn.all.under$sensitivities)
+
+# all variable datasets
+ROC_nn = roc(test$target, nn.p[,1])
+df_nn = data.frame(1 - ROC_nn$specificities, ROC_nn$sensitivities)
+ROC_nn.over = roc(test$target, nn.over.p[,1])
+df_nn.over = data.frame(1 - ROC_nn.over$specificities, ROC_nn.over$sensitivities)
+ROC_nn.both = roc(test$target, nn.both.p[,1])
+df_nn.both = data.frame(1 - ROC_nn.both$specificities, ROC_nn.both$sensitivities)
+ROC_nn.under = roc(test$target, nn.under.p[,1])
+df_nn.under = data.frame(1 - ROC_nn.under$specificities, ROC_nn.under$sensitivities)
+
+# Dataset Compare Table
+nn.auc.compare = data.frame(Models = c("Top 10 IG original dataset","Top 10 IG oversampled dataset","Top 10 IG bothsampled dataset","Top 10 IG undersampled dataset","Positive IG original dataset","Positive IG oversampled dataset","Positive IG bothsampled dataset","Positive IG undersampled dataset","All features original dataset","All features oversampled dataset","All features bothsampled dataset","All features undersampled dataset"), AUC = c(auc(ROC_nn.top.origin),auc(ROC_nn.top.over),auc(ROC_nn.top.both),auc(ROC_nn.top.under), auc(ROC_nn.all.origin),auc(ROC_nn.all.over),auc(ROC_nn.all.both),auc(ROC_nn.all.under),  auc(ROC_nn),auc(ROC_nn.over),auc(ROC_nn.both),auc(ROC_nn.under))) 
+
+nn.result = data.frame(t(data.frame(nn.top.origin_result, nn.top.over_result, nn.top.both_result, nn.top.under_result, nn.all.origin_result, nn.all.over_result, nn.all.both_result, nn.all.under_result, nn_result, nn.over_result, nn.both_result, nn.under_result)))
+nn.compare = cbind(nn.result, nn.auc.compare)
+rownames(nn.compare) = nn.compare$Models
+nn.compare$Models = NULL
+nn.compare = nn.compare %>%
+  arrange(desc(Recall, AUC))
+view(nn.compare)
+
+
+## Plot ROC
+# top 10 IG variable datasets
+plot(df_nn.top.origin, col = "darkslategray1", type = 'l', xlab = "False Positive Rate", ylab = "True Positive Rate", main = "Neural Network with different features and balancing techniques")
+lines(df_nn.top.over, col = "darkslategray2")
+lines(df_nn.top.both, col = "darkslategray3")
+lines(df_nn.top.under, col = "darkslategray4")
+
+# positive IG variable datasets
+lines(df_nn.all.origin, col = "darkorchid1")
+lines(df_nn.all.over, col = "darkorchid2")
+lines(df_nn.all.both, col = "darkorchid3")
+lines(df_nn.all.under, col = "darkorchid4")
+
+# all variable datasets
+lines(df_nn, col = "darkolivegreen1")
+lines(df_nn.over, col = "darkolivegreen2")
+lines(df_nn.both, col = "darkolivegreen3")
+lines(df_nn.under, col = "darkolivegreen4")
+
+abline(a = 0, b = 1)
+legend("bottomright", inset=c(0,0), c("Top 10 IG original dataset","Top 10 IG oversampled dataset","Top 10 IG botsampled dataset","Top 10 IG undersampled dataset","Positive IG original dataset","Positive IG oversampled dataset","Positive IG bothsampled dataset","Positive IG undersampled dataset","All features original dataset","All features oversampled dataset","All features bothsampled dataset","All features undersampled dataset"), fill=c("darkslategray1", "darkslategray2", "darkslategray3", "darkslategray4", "darkorchid1", "darkorchid2", "darkorchid3", "darkorchid4", "darkolivegreen1", "darkolivegreen2", "darkolivegreen3", "darkolivegreen4"), cex = 0.55)
+```
+
+
+## ==================== Select the Best Model and the Best Dataset ====================
+
+# 1. Naive Bayes - using oversampled training set with all 200 variables 
+```{r}
+# Train model
+m.nb.over = naiveBayes(target ~ ., data = train_over, laplace = 1)
+
+# Build ConfusionMatrix
+nb.over.conf = confusionMatrix(predict(m.nb.over, test), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+
+# Probability Prediction
+nb.over.p = predict(m.nb.over, test, type = "raw")[,2]
+
+# Class Prediction
+nb.over.predict = factor(predict(m.nb.over, test))
+
+# Check for overfitting. Accuracy rate for the training set:
+length(which(predict(m.nb.over,train_over)==train_over$target))/nrow(train_over)
+```
+Accuracy rate on the training set is 4% higher than on the test set, thus this model doesn't overfit completely.
+
+
+## 2. Logistic Regression - using oversampled training set with variables which IG > 0
+```{r}
+# Train model
+m.glm.all.over = glm(target ~ ., data = train_var_over_all, family = "binomial")
+
+# Probability Prediction
+glm.p.all.over = predict(m.glm.all.over, test, type = "response")
+
+# Class Prediction
+glm.all.over.predict = factor(ifelse(glm.p.all.over > 0.5, 1, 0))
+
+# ConfusionMatrix
+glm.all.over.conf = confusionMatrix(glm.all.over.predict, 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+
+# Check for overfitting. Accuracy rate for the training set:
+length(which(factor(ifelse(predict(m.glm.all.over,train_var_over_all, type = "response") > 0.5, 1, 0))==train_var_over_all$target))/nrow(train_var_over_all)
+
+```
+Accuracy rate on the training set is lower than on the test set, thus this model doesn't overfit.
+
+
+## 3. LDA - using oversampled training set with all 200 variables
+```{r}
+# Train model
+m.lda.over = lda(target ~ ., data = train_over)
+lda.predict.over = predict(m.lda.over, test)
+
+# ConfusionMatrix
+lda.over.conf = confusionMatrix(factor(lda.predict.over$class), 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+
+# Probability Prediction
+lda.p.over = lda.predict.over$posterior
+
+# Class Prediction
+lda.over.predict = factor(lda.predict.over$class)
+
+# Check for overfitting. Accuracy rate for the training set:
+length(which(predict(m.lda.over,train_over)$class==train_over$target))/nrow(train_over)
+```
+Accuracy rate on the training set is lower than on the test set, thus this model doesn't overfit.
+
+
+## 4. Neural Network - using oversampled training set with all 200 variables
+```{r}
+## Data sampling: reduce data size to reduce runtime
+set.seed(123)
+SPLIT = sample.split(train_over$target, SplitRatio = 0.04)
+train.small = subset(train_over, SPLIT == TRUE)
+rm(SPLIT)
+
+## Normalisation
+norm.train_over = train.small
+norm.test_over = test[,c(colnames(train.small))]
+norm.values.over = preProcess(train.small[, 2:201], method=c("range")) 
+norm.train_over[, 2:201] = predict(norm.values.over, train.small[, 2:201])
+norm.test_over[, 2:201] = predict(norm.values.over, test[,c(colnames(train.small))][, 2:201])
+rm(norm.values.over)
+
+# Find the best hidden layer size
+set.seed(123)
+registerDoParallel(makeCluster(detectCores()-1))
+getDoParWorkers()
+norm.train_over$Target = norm.train_over$target == 1
+norm.train_over$NonTarget = norm.train_over$target == 0
+m.nn.over.test = train(Target + NonTarget ~.-target, data = norm.train_over, method = "neuralnet", tuneGrid = expand.grid(.layer1 = c(30), .layer2 = c(10:30), .layer3 = c(0)), learningrate = 0.1, act.fct = "logistic", linear.output = F, stepmax = 5e5, trControl = trainControl(method = "cv", number = 5))
+stopCluster(makeCluster(detectCores()))
+registerDoSEQ()
+plot(m.nn.over.test)
+
+# Train model
+set.seed(123)
+m.nn.over = neuralnet(Target + NonTarget ~.-target, 
+                            data = norm.train_over, 
+                            linear.output = F, act.fct = 'logistic',
+                            hidden = c(30, 24), 
+                            stepmax = 5e5,
+                            learningrate = 0.05)
+
+# Probability Prediction
+nn.over.p = neuralnet::compute(m.nn.over, norm.test_over[,-1])
+nn.over.p = data.frame(nn.over.p$net.result)
+
+# Class Prediction
+nn.over.class = factor(ifelse(nn.over.p[[1]] > 0.5, 1, 0))
+
+# ConfusionMatrix
+nn.over.conf = confusionMatrix(nn.over.class, norm.test_over$target, positive = "1")
+
+# Check overfitting
+length(which(factor(ifelse(data.frame(neuralnet::compute(m.nn.over, norm.train_over)$net.result)[[1]] > 0.5, 1, 0)) == norm.train_over$target))/nrow(norm.train_over)
+```
+Accuracy rate on the training set is much higher than on the test set, thus this model is extremely overfitting.
+
+
+## 5. Randomforest - using undersampled training test with variables which IG > 0
+```{r}
+# Find the best mtry and ntree values
+set.seed(200)
+tune.rf = tuneRF(train_var_under_all %>% select(-target), train_var_under_all$target, mtryStart = 2, stepFactor = 1.5, improve = 0.01, ntreeTry = 1000, trace = T, plot = T, doBest = T, cutoff=c(0.55,0.45))
+
+# OOB error is the lowest when mtry = 4 and ntree = 500, cutoff = 0.45
+mtry = 4
+ntree = 500
+
+# Train model
+RF_under_ig <- randomForest(target~., train_var_under_all, ntree = ntree, mtry = mtry, cutoff=c(0.55,0.45))
+
+# ConfusionMatrix
+RF_under_ig_confm <- confusionMatrix(predict(RF_under_ig,test), test$target, positive = "1", mode = "everything")
+
+# Class Prediction
+RF.under.predict = factor(predict(RF_under_ig,test))
+
+# Probability Prediction
+RF.under.p = predict(RF_under_ig, test, type = "prob")
+
+# Check for overfitting. Accuracy rate for the training set:
+length(which(predict(RF_under_ig,train_var_under_all)==train_var_under_all$target))/nrow(train_var_under_all)
+```
+Accuracy rate on the training set is much higher than on the test set, thus this model is extremely overfitting.
+
+
+## 6. XGBoost - using undersampled training set with all 200 variables
+```{r}
+# Convert dataframe into matrix
+train_target2 <- as.numeric(train_under$target) - 1
+train_xgb2 <- train_under
+train_xgb2$target <- NULL
+train_xgb2 <- data.matrix(train_xgb2)
+dtrain2 <- xgb.DMatrix(train_xgb2, label = train_target2)
+
+test_target <- test$target
+test_xgb <- test
+test_xgb$target <- NULL
+test_xgb <- data.matrix(test_xgb)
+dtest <- xgb.DMatrix(test_xgb, label = test_target)
+
+params <- list(eta = 0.05,
+              subsample = 0.8,
+              colsample_bytree = 1,
+              eval_metric = "auc")
+
+# Train model
+m.xgb.under = xgb.train(params = params,  max_depth = 3, data = dtrain2, objective = "binary:logistic", nrounds = 1037)
+
+# Probability Prediction
+xgb.predict.p = predict(m.xgb.under, newdata = dtest)
+
+# Class Prediction
+xgb.predict = factor(ifelse(xgb.predict.p > 0.475, 1, 0))
+
+# ConfusionMatrix
+xgb.confm = confusionMatrix(xgb.predict, test_target, positive = "1", mode = "everything")
+xgb.confm
+
+# Check overfitting
+length(which(factor(ifelse(predict(m.xgb.under, newdata = dtrain2) > 0.475, 1, 0)) == train_under$target))/nrow(train_under)
+
+```
+Accuracy rate on the training set is much higher than on the test set, thus this model is extremely overfitting.
+
+
+## Ensemble: Using Majority Vote and Probability Average to make predictions
+```{r}
+## Majority Vote
+ensemble = data.frame(nb.over.predict,glm.all.over.predict,lda.over.predict,nn.over.class,xgb.predict)
+
+ensemble$Predict = 0
+for (i in 1:nrow(ensemble)){
+  if((as.numeric(ensemble[i,1])+as.numeric(ensemble[i,2])+as.numeric(ensemble[i,3])+as.numeric(ensemble[i,4])+as.numeric(ensemble[i,5])-5)>=3){
+    ensemble$Predict[i] = 1
+  }
+}
+ensemble$Predict = factor(ensemble$Predict)
+ensem.conf = confusionMatrix(ensemble$Predict, test$target, positive = "1")
+
+
+## Probability Average
+ensemble.p = data.frame(nb.over.p,glm.p.all.over,lda.p.over[,2],nn.over.p[[1]],RF.under.p[,2], xgb.predict.p)
+
+ensemble.p$Prob = 0
+for (i in 1:nrow(ensemble.p)){
+  ensemble.p$Prob[i] = (3*ensemble.p[i,1]+0.5*ensemble.p[i,2]+0.5*ensemble.p[i,3]+2*ensemble.p[i,6])/6
+}
+
+ensemble.p = ensemble.p %>%
+  mutate(Class = factor(ifelse(Prob > 0.335, 1, 0)))
+ensem.p.conf = confusionMatrix(ensemble.p$Class, test$target, positive = "1", mode = "everything")
+ensem.p.conf
+```
+
+
+## ============================= Model Evaluating ==============================
+
+# Get information on the best models from ConfusionMatrix
+```{r}
+nb_result = c(nb.over.conf$overall["Accuracy"], nb.over.conf$byClass["Recall"], FalsePositive = 1-nb.over.conf$byClass["Specificity"], nb.over.conf$byClass["Precision"])
+glm.all.over_result = c(glm.all.over.conf$overall["Accuracy"], glm.all.over.conf$byClass["Recall"], FalsePositive = 1-glm.all.over.conf$byClass["Specificity"], glm.all.over.conf$byClass["Precision"])
+lda.over_result = c(lda.over.conf$overall["Accuracy"], lda.over.conf$byClass["Recall"], FalsePositive = 1-lda.over.conf$byClass["Specificity"], lda.over.conf$byClass["Precision"])
+nn.over_result = c(nn.over.conf$overall["Accuracy"], nn.over.conf$byClass["Recall"], FalsePositive = 1-nn.over.conf$byClass["Specificity"], nn.over.conf$byClass["Precision"])
+rf.all.under_result = c(RF_under_ig_confm$overall["Accuracy"], RF_under_ig_confm$byClass["Recall"], FalsePositive = 1-RF_under_ig_confm$byClass["Specificity"], RF_under_ig_confm$byClass["Precision"])
+xgb_result = c(xgb.confm$overall["Accuracy"], xgb.confm$byClass["Recall"], FalsePositive = 1-xgb.confm$byClass["Specificity"], xgb.confm$byClass["Precision"])
+ensemble_result = c(ensem.p.conf$overall["Accuracy"], ensem.p.conf$byClass["Recall"], FalsePositive = 1-ensem.p.conf$byClass["Specificity"], ensem.p.conf$byClass["Precision"])
+```
+
+# ROC and plot
+```{r}
+## Build ROC objects
+ROC_nb.over = roc(test$target, nb.over.p)
+df_nb.over = data.frame(1 - ROC_nb.over$specificities, ROC_nb.over$sensitivities)
+auc_nb = auc(ROC_nb.over)
+ROC_glm.all.over = roc(test$target, glm.p.all.over)
+df_glm.all.over = data.frame(1 - ROC_glm.all.over$specificities, ROC_glm.all.over$sensitivities)
+auc_glm = auc(ROC_glm.all.over)
+ROC_lda.over = roc(test$target, lda.p.over[,2])
+df_lda.over = data.frame(1 - ROC_lda.over$specificities, ROC_lda.over$sensitivities)
+auc_lda = auc(ROC_lda.over)
+ROC_nn.over = roc(test$target, nn.over.p[,1])
+df_nn.over = data.frame(1 - ROC_nn.over$specificities, ROC_nn.over$sensitivities)
+auc_nn = auc(ROC_nn.over)
+ROC_RF_under_ig = roc(test$target, predict(RF_under_ig,test,type="prob")[,2])
+df_RF_under_ig = data.frame(1 - ROC_RF_under_ig$specificities, ROC_RF_under_ig$sensitivities)
+auc_RF = auc(ROC_RF_under_ig)
+ROC_xgb = roc(test$target, xgb.predict.p)
+df_xgb = data.frame(1 - ROC_xgb$specificities, ROC_xgb$sensitivities)
+auc_xgb = auc(ROC_xgb)
+ROC_Ensemble = roc(test$target, ensemble.p$Prob)
+df_Ensemble = data.frame(1 - ROC_Ensemble$specificities, ROC_Ensemble$sensitivities)
+auc_Ensemble = auc(ROC_Ensemble)
+
+
+# Dataset Comparison Table
+model.compare = setNames(data.frame(t(data.frame(NaiveBayes = auc_nb, LogisticRegression = auc_glm, LinearDiscriminant = auc_lda, NeuralNetwork = auc_nn, RandomForest = auc_RF, XGBoost = auc_xgb, Ensemble = auc_Ensemble))), "AUC")
+
+model.confm.compare = data.frame(t(data.frame(nb_result, glm.all.over_result, lda.over_result, nn.over_result, rf.all.under_result, xgb_result, ensemble_result))) 
+model.confm.compare = model.confm.compare %>%
+  rename(FalsePositive = FalsePositive.Specificity)
+rownames(model.confm.compare) = c("Naive Bayes", "Logistic Regression", "Linear Discriminant Analysis", "Neural Network", "Random Forest", "XGBoost", "Ensemble")
+model.compare = cbind(model.compare, model.confm.compare)
+view(model.compare)
+
+
+## Plot ROC
+plot(df_nb.over, col = "red", type = 'l', xlab = "False Positive Rate", ylab = "True Positive Rate", main = "Model Comparison")
+lines(df_glm.all.over, col = "gold")
+lines(df_lda.over, col = "gray1")
+lines(df_nn.over, col = "brown")
+lines(df_RF_under_ig, col = "purple")
+lines(df_xgb, col = "green")
+lines(df_Ensemble, col = "blue")
+abline(a = 0, b = 1)
+legend("bottomright", inset=c(0,0), c("Naive Bayes Classifier", "Logistic Regression", "Linear Discriminant Analysis", "Neural Network", "Random Forest", "XGBoost", "Ensemble"), fill=c("red", "gold", "gray1", "brown", "purple", "green", "blue"), cex = 0.8)
+```
+
+Naive Bayes model trained with oversampling dataset has the best performance based on the highest AUC and Recall rate, so we have chosen Naive Bayes to be our final model.
+
+
+# Change probability threshold to illustrate the variances of Recall, False Positive rate, and Precision rates.
+```{r}
+threshold = c()
+Recall = c()
+FalsePositive = c()
+Precision = c()
+for (i in seq(0.4, 0.6, 0.02)){
+  threshold = c(threshold, i)
+  nb.pre = factor(ifelse(nb.over.p > i, 1, 0))
+  nb.pre.confm = confusionMatrix(nb.pre, 
+                                  test$target, 
+                                  positive = "1", 
+                                  mode = "everything")
+  Recall = c(Recall, nb.pre.confm$byClass["Recall"])
+  FalsePositive = c(FalsePositive, 1-nb.pre.confm$byClass["Specificity"])
+  Precision = c(Precision, nb.pre.confm$byClass["Precision"])
+}
+nb.threshold = data.frame(threshold, Recall, FalsePositive, Precision)
+view(nb.threshold)
+```
+
+We have chosen p = 0.46 as the threshold for the Naive Bayes model since it has a good balance between the Recall, False Positive rate, and Precision rates.
